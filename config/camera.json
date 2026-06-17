@@ -1,0 +1,19 @@
+{
+  "name": "bfly0",
+  "model": "BFS-U3-51S5C",
+  "serial": null,
+  "device_index": 0,
+  "max_resolution": [2448, 2048],
+  "max_fps": 75.0,
+  "bit_depth": 12,
+  "dynamic_range_db": 71.0,
+  "sensor_format": "2/3\"",
+  "lens_fov_deg": 60.0,
+  "focal_length_mm": 6.0,
+  "pixel_format": "BGR8",
+  "features": ["GAIN", "EXPOSURE", "FRAME_RATE", "RESOLUTION", "BLACK_LEVEL", "GAMMA"],
+  "resolution": [1024, 1024],
+  "fps": 60.0,
+  "exposure_us": 4000.0,
+  "gain_db": 2.0
+}

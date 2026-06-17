@@ -1,0 +1,583 @@
+"""
+tests/test_suite.py
+NFR-010: unit tests covering normal, boundary, and error cases, mapped to the
+SRS 6.1 Requirements Test Map. Pure stdlib unittest (no pytest needed).
+
+Run:  python -m unittest discover -s tests
+  or: python tests/test_suite.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+import unittest
+
+import numpy as np
+import cv2
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT) # root scripts (run_hardware)
+sys.path.insert(0, os.path.join(_ROOT, "src")) # the `vision` package (src layout)
+
+from vision.camera_driver import (CameraError, CameraTimeoutError,
+                           FeatureNotSupportedError, MalformedFrameError)
+from vision.camera_service import CameraService
+from vision.camera_types import (CameraConfig, CameraFeature, CameraFrame,
+                          CameraStatus, PixelFormat)
+from vision.centroid_buffer import CentroidRingBuffer, RxTimebase
+from vision.centroid_extraction import CentroidExtractor, ExtractorParams
+from vision.centroid_types import Centroid, CentroidProfile
+from vision.config_loader import ConfigError, load_camera_config, load_camera_configs
+from vision.frame_buffers import CircularFrameBuffer, FIFOFrameBuffer
+from vision.generic_driver import GenericCameraDriver
+from vision.lens import (angular_fov_deg, focal_length_mm, linear_fov_mm,
+                  sensor_dims_mm, working_distance_mm)
+from vision.queuing_subsystem import QueuingSubsystem
+from vision.vision_system import VisionSystem
+
+
+def make_spot_image(sz=256, spots=((73, 128), (180, 60)), radius=5):
+    img = np.full((sz, sz), 5, np.uint8)
+    for (x, y) in spots:
+        cv2.circle(img, (x, y), radius, 250, -1)
+    return img
+
+
+def basic_config(name="cam", **kw):
+    defaults = dict(
+        name=name, model="sim", max_resolution=(512, 512), max_fps=60.0,
+        resolution=(512, 512), fps=60.0,
+        features=(CameraFeature.GAIN | CameraFeature.EXPOSURE |
+                  CameraFeature.FRAME_RATE | CameraFeature.RESOLUTION))
+    defaults.update(kw)
+    return CameraConfig(**defaults)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   FR-001: configuration ingestion
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestConfigLoader(unittest.TestCase): # UT-001
+    def _write(self, obj):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_normal_load(self):
+        path = self._write({
+            "name": "c0", "model": "m", "max_resolution": [1024, 1024],
+            "max_fps": 60.0, "features": ["GAIN", "EXPOSURE"],
+            "pixel_format": "Mono8", "resolution": [800, 600], "fps": 60.0})
+        cfg = load_camera_config(path)
+        self.assertEqual(cfg.name, "c0")
+        self.assertEqual(cfg.resolution, (800, 600))
+        self.assertTrue(cfg.supports(CameraFeature.GAIN))
+        self.assertEqual(cfg.pixel_format, PixelFormat.MONO8)
+
+    def test_multi_camera(self):
+        path = self._write({"cameras": [
+            {"name": "a", "max_resolution": [512, 512]},
+            {"name": "b", "max_resolution": [512, 512]}]})
+        cfgs = load_camera_configs(path)
+        self.assertEqual([c.name for c in cfgs], ["a", "b"])
+
+    def test_missing_file_errors(self): # error case
+        with self.assertRaises(ConfigError):
+            load_camera_config("/no/such/file.json")
+
+    def test_malformed_file_errors(self): # error case
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.write(fd, b"{ not valid json ]")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        with self.assertRaises(ConfigError):
+            load_camera_config(path)
+
+    def test_unknown_feature_errors(self): # error case
+        path = self._write({"name": "x", "features": ["NOT_A_FEATURE"]})
+        with self.assertRaises(ConfigError):
+            load_camera_config(path)
+
+
+class TestConfigValidation(unittest.TestCase): # NFR-001/003/004
+    def test_compliant_has_no_warnings(self):
+        cfg = basic_config(max_resolution=(1024, 1024),
+                           resolution=(1024, 1024), fps=60.0,
+                           lens_fov_deg=60.0)
+        self.assertEqual(cfg.validate(), [])
+
+    def test_undersized_resolution_warns(self): # NFR-003 boundary
+        cfg = basic_config(max_resolution=(256, 256), resolution=(256, 256))
+        self.assertTrue(any("NFR-003" in w for w in cfg.validate()))
+
+    def test_low_fps_warns(self): # NFR-001 boundary
+        cfg = basic_config(max_fps=30.0, fps=30.0)
+        self.assertTrue(any("NFR-001" in w for w in cfg.validate()))
+
+    def test_narrow_fov_warns(self): # NFR-004 boundary
+        cfg = basic_config(lens_fov_deg=20.0)
+        self.assertTrue(any("NFR-004" in w for w in cfg.validate()))
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Driver lifecycle / FR-002 / feature gating
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestGenericDriver(unittest.TestCase): # UT-002
+    def setUp(self):
+        self.drv = GenericCameraDriver(basic_config(), n_spots=4)
+
+    def tearDown(self):
+        self.drv.disconnect()
+
+    def test_lifecycle(self): # normal
+        self.assertEqual(self.drv.get_status(), CameraStatus.DISCONNECTED)
+        self.drv.connect()
+        self.assertEqual(self.drv.get_status(), CameraStatus.CONNECTED)
+        self.drv.start_stream()
+        self.assertEqual(self.drv.get_status(), CameraStatus.STREAMING)
+        frame = self.drv.read_frame(timeout=1.0)
+        self.assertIsInstance(frame, CameraFrame)
+        self.assertEqual(frame.data.shape, (512, 512, 3))
+        self.drv.stop_stream()
+        self.assertEqual(self.drv.get_status(), CameraStatus.CONNECTED)
+
+    def test_read_before_stream_errors(self): # error
+        self.drv.connect()
+        with self.assertRaises(CameraError):
+            self.drv.read_frame(timeout=0.1)
+
+    def test_unsupported_feature_errors(self): # error
+        self.drv.connect()
+        cfg = basic_config(features=CameraFeature.NONE)
+        drv = GenericCameraDriver(cfg)
+        drv.connect()
+        with self.assertRaises(FeatureNotSupportedError):
+            drv.set_config("gain_db", 1.0)
+        drv.disconnect()
+
+    def test_malformed_injection(self): # NFR-006 source
+        self.drv.connect(); self.drv.start_stream()
+        self.drv.inject_malformed(2)
+        with self.assertRaises(MalformedFrameError):
+            self.drv.read_frame(timeout=1.0)
+        with self.assertRaises(MalformedFrameError):
+            self.drv.read_frame(timeout=1.0)
+        # Recovers afterwards
+        self.assertIsInstance(self.drv.read_frame(timeout=1.0), CameraFrame)
+
+    def test_context_manager(self):
+        with GenericCameraDriver(basic_config()) as drv:
+            self.assertEqual(drv.get_status(), CameraStatus.CONNECTED)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   FR-003 centroid extraction / NFR-002 latency
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestCentroidExtraction(unittest.TestCase): # UT-003
+    def test_detects_known_spots(self): # normal + accuracy
+        img = make_spot_image(spots=((73, 128), (180, 60)))
+        ex = CentroidExtractor(ExtractorParams(threshold=60, min_area=6))
+        cents = ex.extract(img)
+        self.assertEqual(len(cents), 2)
+        found = sorted((round(c.x), round(c.y)) for c in cents)
+        self.assertIn((73, 128), found)
+        self.assertIn((180, 60), found)
+
+    def test_blank_frame_zero_centroids(self): # boundary
+        ex = CentroidExtractor(ExtractorParams(threshold=60, min_area=6))
+        self.assertEqual(ex.extract(np.full((128, 128), 5, np.uint8)), [])
+
+    def test_min_area_filters_speck(self): # boundary
+        img = make_spot_image(sz=128, spots=((64, 64),), radius=1)
+        ex = CentroidExtractor(ExtractorParams(threshold=60, min_area=50))
+        self.assertEqual(ex.extract(img), [])
+
+    def test_both_methods_agree(self):
+        img = make_spot_image(spots=((73, 128), (180, 60)))
+        a = CentroidExtractor(ExtractorParams(threshold=60, min_area=6,
+                                              method="contour")).extract(img)
+        b = CentroidExtractor(ExtractorParams(threshold=60, min_area=6,
+                                              method="cc")).extract(img)
+        self.assertEqual(len(a), len(b))
+
+    def test_latency_budget(self): # NFR-002
+        img = make_spot_image(sz=512, spots=tuple(
+            (40 + 60 * i, 40 + 60 * i) for i in range(6)))
+        ex = CentroidExtractor(ExtractorParams(threshold=60, min_area=6))
+        ex.extract(img) # warm
+        ts = []
+        for _ in range(100):
+            t = time.perf_counter(); ex.extract(img)
+            ts.append((time.perf_counter() - t) * 1e6)
+        self.assertLess(np.percentile(ts, 99), 5000.0,
+                        f"p99 {np.percentile(ts, 99):.0f}us exceeds 5ms")
+
+    def test_handles_color_input(self):
+        img = make_spot_image(spots=((73, 128),))
+        bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        ex = CentroidExtractor(ExtractorParams(threshold=60, min_area=6))
+        self.assertEqual(len(ex.extract(bgr)), 1)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   SRS 5.2 ring buffer / NFR-007 thread safety
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestCentroidRingBuffer(unittest.TestCase):
+    def _profile(self, seq):
+        return CentroidProfile(seq_id=seq, frame_id=seq,
+                               t_rx_monotonic_us=seq * 1000, centroids=[])
+
+    def test_fifo_order(self): # normal
+        rb = CentroidRingBuffer(n_max_samples=8)
+        for i in range(5):
+            rb.push(self._profile(i))
+        out = [rb.pop(timeout=0.1).seq_id for _ in range(5)]
+        self.assertEqual(out, [0, 1, 2, 3, 4])
+
+    def test_overwrite_when_full(self): # boundary
+        rb = CentroidRingBuffer(n_max_samples=3)
+        for i in range(5):
+            rb.push(self._profile(i))
+        self.assertEqual(rb.n_overwritten, 2)
+        seqs = [rb.pop(timeout=0.1).seq_id for _ in range(3)]
+        self.assertEqual(seqs, [2, 3, 4]) # oldest two dropped
+
+    def test_pop_empty_timeout(self): # error/empty
+        rb = CentroidRingBuffer(n_max_samples=2)
+        self.assertIsNone(rb.pop(timeout=0.05))
+
+    def test_timebase_anchor(self):
+        rb = CentroidRingBuffer(n_max_samples=4)
+        rb.f_sample_hz = 60.0
+        rb.push(self._profile(10))
+        self.assertTrue(rb.timebase_set)
+        self.assertEqual(int(rb.rx_timebase.t0_us), 10 * 1000)
+
+    def test_concurrent_no_deadlock(self): # NFR-007
+        rb = CentroidRingBuffer(n_max_samples=16)
+        N = 2000
+        consumed = []
+        stop = threading.Event()
+
+        def producer():
+            for i in range(N):
+                rb.push(self._profile(i))
+
+        def consumer():
+            while not stop.is_set() or rb.available() > 0:
+                p = rb.pop(timeout=0.05)
+                if p is not None:
+                    consumed.append(p.seq_id)
+
+        c = threading.Thread(target=consumer)
+        c.start()
+        producer()
+        time.sleep(0.2)
+        stop.set()
+        rb.wake_all()
+        c.join(timeout=3.0)
+        self.assertFalse(c.is_alive(), "consumer deadlocked")
+        # Monotonic, no duplicates among consumed
+        self.assertEqual(consumed, sorted(consumed))
+        self.assertEqual(len(consumed), len(set(consumed)))
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Frame buffers
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestFrameBuffers(unittest.TestCase):
+    def _frame(self, fid):
+        return CameraFrame(data=np.zeros((4, 4), np.uint8),
+                           timestamp=time.monotonic(), frame_id=fid)
+
+    def test_circular_overwrite(self): # boundary
+        rb = CircularFrameBuffer(capacity=3)
+        for i in range(5):
+            rb.push(self._frame(i))
+        self.assertEqual(rb.dropped, 2)
+        self.assertEqual(rb.pop(timeout=0.1).frame_id, 2)
+
+    def test_circular_latest(self):
+        rb = CircularFrameBuffer(capacity=4)
+        for i in range(3):
+            rb.push(self._frame(i))
+        self.assertEqual(rb.latest().frame_id, 2)
+
+    def test_fifo_drop_newest(self): # boundary
+        q = FIFOFrameBuffer(capacity=2)
+        for i in range(5):
+            q.push(self._frame(i))
+        self.assertEqual(q.dropped, 3)
+        self.assertEqual(q.pop(timeout=0.1).frame_id, 0) # order preserved
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Service-level: FR-002 streaming, NFR-005 reconnect, NFR-006 skip
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestCameraService(unittest.TestCase):
+    def setUp(self):
+        self.svc = CameraService()
+        self.svc.MAX_RECONNECT_ATTEMPTS = 5
+        self.svc.RECONNECT_DELAY_S = 0.05
+        self.drv = GenericCameraDriver(basic_config("svccam"), n_spots=4)
+        self.svc.add_camera("svccam", self.drv)
+
+    def tearDown(self):
+        self.svc.shutdown()
+
+    def test_fanout_to_two_sinks(self): # FR-002 / fan-out
+        ring = CircularFrameBuffer(32)
+        fifo = FIFOFrameBuffer(8)
+        self.svc.attach_sink("svccam", ring)
+        self.svc.attach_sink("svccam", fifo)
+        self.svc.connect("svccam")
+        self.svc.start_streaming("svccam")
+        time.sleep(0.4)
+        self.svc.stop_streaming("svccam")
+        self.assertGreater(self.svc.stats("svccam")["frames_delivered"], 0)
+        self.assertIsNotNone(ring.pop(timeout=0.2))
+
+    def test_malformed_skip(self): # NFR-006 / FT-002
+        ring = CircularFrameBuffer(32)
+        self.svc.attach_sink("svccam", ring)
+        self.svc.connect("svccam")
+        self.svc.start_streaming("svccam")
+        time.sleep(0.1)
+        self.drv.inject_malformed(3)
+        time.sleep(0.3)
+        self.svc.stop_streaming("svccam")
+        st = self.svc.stats("svccam")
+        self.assertGreaterEqual(st["malformed_frames"], 3)
+        # Still delivering frames after the malformed ones
+        self.assertGreater(st["frames_delivered"], 0)
+
+    def test_backend_crash_reconnects(self): # NFR-005 / FT-001
+        ring = CircularFrameBuffer(32)
+        self.svc.attach_sink("svccam", ring)
+        self.svc.connect("svccam")
+        self.svc.start_streaming("svccam")
+        time.sleep(0.1)
+        self.drv.inject_backend_crash()
+        # Poll for recovery instead of racing a fixed sleep, so the test stays
+        # deterministic under parallel load (NFR-005 has no hard deadline here).
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if (self.svc.get_status("svccam") == CameraStatus.STREAMING
+                    and self.svc.stats("svccam")["reconnects"] >= 1):
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.svc.get_status("svccam"), CameraStatus.STREAMING)
+        self.assertGreaterEqual(self.svc.stats("svccam")["reconnects"], 1)
+
+    def test_config_file_registration(self): # FR-001 integration
+        path = os.path.join(os.path.dirname(__file__), "..",
+                            "config", "camera.json")
+        svc = CameraService()
+        names = svc.add_cameras_from_config(
+            os.path.abspath(path), lambda c: GenericCameraDriver(c))
+        self.assertIn("bfly0", names)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   End-to-end vision + queuing (FR-003/FR-004, NFR-007/NFR-008)
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestVisionEndToEnd(unittest.TestCase): # IT-002
+    def test_frames_to_centroids_to_queue(self):
+        svc = CameraService()
+        drv = GenericCameraDriver(basic_config("e2e"), n_spots=5)
+        svc.add_camera("e2e", drv)
+        ring = CircularFrameBuffer(32)
+        cring = CentroidRingBuffer(128)
+        svc.attach_sink("e2e", ring)
+
+        gui_hits = {"n": 0}
+        vision = VisionSystem(
+            ring, cring,
+            extractor=CentroidExtractor(
+                ExtractorParams(threshold=60, min_area=6)),
+            gui_callback=lambda f, p: gui_hits.__setitem__("n", gui_hits["n"] + 1))
+        consumed = []
+        q = QueuingSubsystem(cring, sink=lambda p: consumed.append(p))
+
+        svc.connect("e2e")
+        q.start(); vision.start(); svc.start_streaming("e2e")
+        time.sleep(0.6)
+        svc.stop_streaming("e2e"); vision.stop(); q.stop(); svc.shutdown()
+
+        self.assertGreater(vision.frames_processed, 0)
+        self.assertGreater(len(consumed), 0)
+        self.assertGreater(gui_hits["n"], 0) # FR-004 / NFR-008
+        # The simulated camera has 5 spots; profiles should carry centroids.
+        self.assertTrue(any(p.n_centroids > 0 for p in consumed))
+
+    def test_invalid_frame_skipped(self): # NFR-006 in vision
+        ring = CircularFrameBuffer(8)
+        cring = CentroidRingBuffer(8)
+        vision = VisionSystem(ring, cring,
+                              extractor=CentroidExtractor())
+        # Push a malformed (empty) frame directly.
+        ring.push(CameraFrame(data=np.empty((0,), np.uint8),
+                              timestamp=time.monotonic(), frame_id=1))
+        vision.start()
+        time.sleep(0.2)
+        vision.stop()
+        self.assertGreaterEqual(vision.frames_skipped, 1)
+        self.assertEqual(vision.frames_processed, 0)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Lens / FOV calculators (NFR-004), validated against the FLIR app note.
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestLensCalculator(unittest.TestCase):
+    def test_flir_worked_example(self):
+        # FLIR note: 1/2" sensor (W=6.4mm), WD=100mm, FOV=50mm ->
+        # 11.3mm exact, 12.8mm approximate.
+        self.assertAlmostEqual(
+            focal_length_mm(6.4, 100.0, 50.0, exact=True), 11.3, delta=0.1)
+        self.assertAlmostEqual(
+            focal_length_mm(6.4, 100.0, 50.0, exact=False), 12.8, delta=0.1)
+
+    def test_imx273_sensor_dims(self):
+        w, h, d = sensor_dims_mm(1440, 1080, 3.45) # BFS-U3-16S2C-CS
+        self.assertAlmostEqual(w, 4.968, places=3)
+        self.assertAlmostEqual(h, 3.726, places=3)
+        self.assertAlmostEqual(d, 6.210, places=2)
+
+    def test_kowa_5mm_angular_fov(self):
+        w, _, _ = sensor_dims_mm(1440, 1080, 3.45)
+        # Matches CameraConfig.lens_fov_deg in config/bfs_u3_16s2c.json.
+        self.assertAlmostEqual(angular_fov_deg(w, 5.0), 52.8, delta=0.2)
+
+    def test_linear_fov_at_3m(self):
+        w, h, _ = sensor_dims_mm(1440, 1080, 3.45)
+        self.assertAlmostEqual(
+            linear_fov_mm(w, 5.0, 3000.0, exact=True), 2975.8, delta=1.0)
+        self.assertAlmostEqual(
+            linear_fov_mm(h, 5.0, 3000.0, exact=True), 2231.9, delta=1.0)
+
+    def test_round_trip(self):
+        w, _, _ = sensor_dims_mm(1440, 1080, 3.45)
+        fov = linear_fov_mm(w, 5.0, 3000.0, exact=True)
+        self.assertAlmostEqual(
+            focal_length_mm(w, 3000.0, fov, exact=True), 5.0, places=6)
+        self.assertAlmostEqual(
+            working_distance_mm(w, 5.0, fov, exact=True), 3000.0, places=3)
+
+    def test_invalid_inputs_raise(self):
+        with self.assertRaises(ValueError):
+            angular_fov_deg(4.968, 0.0)
+        with self.assertRaises(ValueError):
+            focal_length_mm(6.4, 100.0, 0.0)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Entry-point scripts import cleanly (no camera / PyQt needed at import time).
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestScriptsImport(unittest.TestCase):
+    def test_run_hardware_imports(self):
+        import run_hardware
+        # arg parsing works without a camera; defaults to the BFS config.
+        ns = run_hardware._parse_args(["--headless", "--seconds", "1"])
+        self.assertTrue(ns.headless)
+        self.assertTrue(ns.config.endswith(".json"))
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+# Hardware smoke test (real BlackFly S over Spinnaker). Skipped automatically
+# when PySpin or a physical camera is not present, so CI stays green; runs on
+# the rig to prove the BFS-U3-16S2C-CS color path (BayerRG8 -> BGR8).
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+def _spinnaker_camera_present() -> bool:
+    try:
+        import PySpin
+    except Exception:
+        return False
+    system = None
+    try:
+        system = PySpin.System.GetInstance()
+        cams = system.GetCameras()
+        n = cams.GetSize()
+        cams.Clear()
+        return n > 0
+    except Exception:
+        return False
+    finally:
+        if system is not None:
+            try:
+                system.ReleaseInstance()
+            except Exception:
+                pass
+
+
+@unittest.skipUnless(_spinnaker_camera_present(),
+                     "PySpin + a physical BlackFly S camera not present")
+class TestSpinnakerHardware(unittest.TestCase): # HW-001 (real device)
+    def test_color_bgr_capture(self):
+        from vision.spinnaker_driver import SpinnakerCameraDriver
+        cfg_path = os.path.join(os.path.dirname(__file__), "..",
+                                "config", "bfs_u3_16s2c.json")
+        cfg = load_camera_config(os.path.abspath(cfg_path))
+        drv = SpinnakerCameraDriver(cfg)
+        # connect() failing here -> SDK/permissions/camera not found:
+        #   check spinview, the flirimaging group/udev, and Phase 0/1 of the
+        #   bring-up section in the README.
+        drv.connect()
+        try:
+            self.assertEqual(
+                drv.get_status(), CameraStatus.CONNECTED,
+                "connect() did not reach CONNECTED — camera opened but init "
+                "failed; check the serial/device_index in the config.")
+            drv.start_stream()
+            frame = drv.read_frame(timeout=2.0)
+
+            # Color camera must yield a 3-channel BGR8 frame at full res.
+            self.assertEqual(
+                frame.data.ndim, 3,
+                f"Got a {frame.data.ndim}-D frame; expected 3-D color. The "
+                "camera isn't debayering to BGR — check 'pixel_format' (BGR8) "
+                "and 'extra.device_pixel_format' (BayerRG8) in the config, and "
+                "that ImageProcessor/Convert ran (see spinnaker_driver._convert).")
+            self.assertEqual(
+                frame.data.shape[2], 3,
+                f"Got {frame.data.shape[2]} channels; expected 3 (BGR). "
+                "Pixel-format conversion produced the wrong layout — verify "
+                "'pixel_format': 'BGR8' in the config.")
+            self.assertEqual(
+                (frame.data.shape[1], frame.data.shape[0]), tuple(cfg.resolution),
+                f"Frame {frame.data.shape[1]}x{frame.data.shape[0]} != configured "
+                f"{tuple(cfg.resolution)}. Width/Height weren't applied (a saved "
+                "user set, binning, or ROI offset may differ) — check "
+                "'resolution' and that RESOLUTION is in 'features'.")
+            self.assertEqual(
+                frame.data.dtype, np.uint8,
+                f"Frame dtype {frame.data.dtype} != uint8. Conversion target is "
+                "wrong — use an 8-bit 'pixel_format' (BGR8/Mono8), not a 16-bit "
+                "format, for the 8-bit pipeline.")
+            self.assertIsNotNone(
+                frame.hw_timestamp_ns,
+                "No hardware timestamp — GetTimeStamp() returned nothing; the "
+                "driver couldn't read the device clock (check Spinnaker/PySpin "
+                "version compatibility).")
+            drv.stop_stream()
+        finally:
+            drv.disconnect()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -95,8 +95,11 @@ class FIFOFrameBuffer:
 
     def pop(self, timeout: Optional[float] = None) -> Optional[CameraFrame]:
         try:
-            return self._q.get(timeout=timeout) if timeout is not None \
-                else self._q.get()
+            if timeout == 0:                 # non-blocking drain (GUI poll)
+                return self._q.get_nowait()
+            if timeout is None:
+                return self._q.get()
+            return self._q.get(timeout=timeout)
         except queue.Empty:
             return None
 

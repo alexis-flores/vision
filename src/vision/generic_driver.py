@@ -57,12 +57,13 @@ class GenericCameraDriver(CameraDriver):
         # --- vendor: open handle, e.g. sdk.open(self.config.serial) ---
         self._crash_pending = False # clear faults on (re)connect
         self._malformed_pending = 0
+        res = self.config.resolution or self.config.max_resolution
         self._attrs = {
             "fps": self.config.fps,
             "exposure_us": self.config.exposure_us or 10_000.0,
             "gain_db": self.config.gain_db or 0.0,
-            "width": self.config.resolution[0],
-            "height": self.config.resolution[1],
+            "width": res[0],
+            "height": res[1],
         }
         self._set_status(CameraStatus.CONNECTED)
 

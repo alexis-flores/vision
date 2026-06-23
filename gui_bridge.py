@@ -79,7 +79,7 @@ class CameraViewer(QMainWindow):
         # Drain backlog, keep only the freshest frame to avoid lag.
         frame = None
         while True:
-            nxt = self._fifo.pop(timeout=None)
+            nxt = self._fifo.pop(timeout=0)   # non-blocking; None when drained
             if nxt is None:
                 break
             frame = nxt

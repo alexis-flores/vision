@@ -37,8 +37,8 @@ class OpenCVCameraDriver(CameraDriver):
 
     def __init__(self, config: CameraConfig, api_preference: int = 0) -> None:
         super().__init__(config)
-        self._cap = None
-        self._cv2 = None
+        self._cap: Any = None
+        self._cv2: Any = None
         self._api_preference = api_preference # e.g. cv2.CAP_V4L2
 
         self._capture_thread: Optional[threading.Thread] = None

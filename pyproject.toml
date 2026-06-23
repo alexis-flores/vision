@@ -32,9 +32,14 @@ gpu = ["cupy>=12.0"]
 # scipy provides the connected-components fallback used when OpenCV is absent.
 scipy = ["scipy>=1.10"]
 
-# Test / development tooling.
+# Test / development + QA tooling.
 dev = [
     "pytest>=7.0",
+    "pytest-timeout>=2.1",
+    "hypothesis>=6.0",
+    "coverage>=7.0",
+    "mypy>=1.0",
+    "ruff>=0.1",
     "scipy>=1.10",
 ]
 
@@ -56,3 +61,17 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+timeout = 120          # fail (don't hang) if a threaded test deadlocks
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["Spinnaker", "Spinnaker-Examples-main"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files set sys.path before importing the package (E402) and use compact
+# `a; b` setup lines (E702); both are intentional and isolated to tests.
+"tests/**" = ["E402", "E702"]
+
+[tool.mypy]
+files = ["src/vision"]
+ignore_missing_imports = true   # PySpin / cv2 / cupy / PyQt6 ship no stubs

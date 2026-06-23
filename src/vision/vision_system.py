@@ -26,7 +26,7 @@ import numpy as np
 
 from .camera_types import CameraFrame
 from .centroid_buffer import CentroidRingBuffer
-from .centroid_extraction import CentroidExtractor, ExtractorParams
+from .centroid_extraction import CentroidExtractor
 from .centroid_types import CentroidProfile
 from .frame_buffers import CircularFrameBuffer
 

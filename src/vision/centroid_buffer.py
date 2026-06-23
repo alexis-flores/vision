@@ -13,7 +13,6 @@ samples, and keeps the same pointer/timebase bookkeeping fields.
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass
 from typing import List, Optional
 

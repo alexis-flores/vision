@@ -8,6 +8,7 @@ package works on machines without the SDK installed.
 from __future__ import annotations
 
 import logging
+import platform
 import time
 from typing import Any, Optional
 
@@ -37,10 +38,10 @@ class SpinnakerCameraDriver(CameraDriver):
 
     def __init__(self, config: CameraConfig) -> None:
         super().__init__(config)
-        self._system = None # PySpin.System singleton ref
-        self._cam = None # PySpin.CameraPtr
-        self._pyspin = None # module handle
-        self._processor = None # PySpin.ImageProcessor (host debayer/convert)
+        self._system: Any = None # PySpin.System singleton ref
+        self._cam: Any = None # PySpin.CameraPtr
+        self._pyspin: Any = None # module handle
+        self._processor: Any = None # PySpin.ImageProcessor (host debayer/convert)
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Lifecycle
@@ -71,11 +72,16 @@ class SpinnakerCameraDriver(CameraDriver):
 
             self._cam.Init()
             self._init_processor()
-            self._apply_initial_config()
+            # Mark CONNECTED before applying config: set_config()/_require_connected
+            # require it, and the camera handle is already valid after Init().
             self._set_status(CameraStatus.CONNECTED)
+            self._apply_initial_config()
         except PySpin.SpinnakerException as e:
             self._set_status(CameraStatus.ERROR)
             raise CameraError(f"Spinnaker connect failed: {e}") from e
+        except CameraError:
+            self._set_status(CameraStatus.ERROR)
+            raise
 
     def disconnect(self) -> None:
         if self.get_status() == CameraStatus.STREAMING:
@@ -83,16 +89,16 @@ class SpinnakerCameraDriver(CameraDriver):
         if self._cam is not None:
             try:
                 self._cam.DeInit()
-            except Exception:
-                pass
+            except Exception as e:  # cleanup must never raise
+                log.debug("DeInit during disconnect: %s", e)
             del self._cam
             self._cam = None
         self._processor = None
         if self._system is not None:
             try:
                 self._system.ReleaseInstance()
-            except Exception:
-                pass
+            except Exception as e:  # cleanup must never raise
+                log.debug("ReleaseInstance during disconnect: %s", e)
             self._system = None
         self._set_status(CameraStatus.DISCONNECTED)
 
@@ -128,8 +134,14 @@ class SpinnakerCameraDriver(CameraDriver):
         try:
             img = self._cam.GetNextImage(timeout_ms)
         except PySpin.SpinnakerException as e:
-            raise CameraTimeoutError(
-                f"No frame within {timeout}s: {e}") from e
+            # Only a genuine timeout is a CameraTimeoutError (service retries).
+            # Any other GetNextImage failure (e.g. device disconnected) is a
+            # backend fault, which must trigger NFR-005 reconnect.
+            timeout_code = getattr(PySpin, "SPINNAKER_ERR_TIMEOUT", -1011)
+            if getattr(e, "errorcode", None) == timeout_code:
+                raise CameraTimeoutError(
+                    f"No frame within {timeout}s: {e}") from e
+            raise CameraError(f"GetNextImage failed: {e}") from e
 
         try:
             if img.IsIncomplete():
@@ -138,7 +150,7 @@ class SpinnakerCameraDriver(CameraDriver):
             # Convert to the requested output format on the host. For color
             # cameras (e.g. BFS-U3-16S2C-CS, native BayerRG8) this debayers to
             # BGR8; for mono it is an inexpensive passthrough/copy.
-            data = np.array(self._convert(img), copy=True)
+            data = self._convert(img) # returns an owned copy
             hw_ts = img.GetTimeStamp() # ns, device clock
         finally:
             img.Release()
@@ -179,10 +191,27 @@ class SpinnakerCameraDriver(CameraDriver):
                 self._cam.GainAuto.SetValue(self._pyspin.GainAuto_Off)
             elif attribute == "fps":
                 self._cam.AcquisitionFrameRateEnable.SetValue(True)
-            getattr(self._cam, node_name).SetValue(value)
+            node = getattr(self._cam, node_name)
+            node.SetValue(self._clamp(attribute, node, value))
         except self._pyspin.SpinnakerException as e:
             raise CameraError(
                 f"Failed to set {attribute}={value}: {e}") from e
+
+    def _clamp(self, attribute: str, node, value):
+        """Clamp a numeric value to the node's [min, max] (per SDK examples).
+
+        Avoids connect failures when a config value is slightly out of range
+        (e.g. fps above the exposure-limited max). Non-numeric nodes pass through.
+        """
+        try:
+            lo, hi = node.GetMin(), node.GetMax()
+        except (AttributeError, self._pyspin.SpinnakerException):
+            return value
+        clamped = max(lo, min(hi, value))
+        if clamped != value:
+            log.warning("%s=%s out of range [%s, %s]; clamped to %s",
+                        attribute, value, lo, hi, clamped)
+        return clamped
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Internals
@@ -217,6 +246,18 @@ class SpinnakerCameraDriver(CameraDriver):
         backlog if a consumer falls behind.
         """
         PySpin = self._pyspin
+        # On Linux/macOS, GEV cameras need StreamMode=Socket (no native filter
+        # driver). The node is absent on USB3, so this is a guarded no-op there.
+        if platform.system() in ("Linux", "Darwin"):
+            try:
+                snm = self._cam.GetTLStreamNodeMap()
+                sm = PySpin.CEnumerationPtr(snm.GetNode("StreamMode"))
+                if PySpin.IsAvailable(sm) and PySpin.IsWritable(sm):
+                    entry = sm.GetEntryByName("Socket")
+                    if PySpin.IsAvailable(entry) and PySpin.IsReadable(entry):
+                        sm.SetIntValue(entry.GetValue())
+            except PySpin.SpinnakerException as e:
+                log.warning("Could not set StreamMode=Socket: %s", e)
         try:
             self._cam.AcquisitionMode.SetValue(PySpin.AcquisitionMode_Continuous)
         except PySpin.SpinnakerException as e:
@@ -248,24 +289,28 @@ class SpinnakerCameraDriver(CameraDriver):
         return getattr(PySpin, mapping.get(pf, ""), None)
 
     def _convert(self, img):
-        """Return an ndarray in the configured output pixel format.
+        """Return an OWNED ndarray (copied) in the configured output format.
 
-        Falls back to the raw device array if no mapping or conversion path
-        is available, so capture never fails on an unexpected format.
+        GetNDArray() shares memory with its source image; we copy while that
+        image is still referenced so the buffer cannot be freed underneath the
+        array (a classic PySpin use-after-free). Falls back to the raw device
+        array if no mapping or conversion path is available.
         """
         PySpin = self._pyspin
         target = self._spin_pixel_format(self.config.pixel_format)
         if target is None:
-            return img.GetNDArray()
+            return np.array(img.GetNDArray(), copy=True)
         try:
             if self._processor is not None:
-                return self._processor.Convert(img, target).GetNDArray()
-            algo = getattr(PySpin, "HQ_LINEAR", 0)
-            return img.Convert(target, algo).GetNDArray()
+                converted = self._processor.Convert(img, target)
+            else:
+                converted = img.Convert(target, getattr(PySpin, "HQ_LINEAR", 0))
+            # copy before `converted` goes out of scope and frees its buffer
+            return np.array(converted.GetNDArray(), copy=True)
         except PySpin.SpinnakerException as e:
             log.warning("Pixel-format conversion failed (%s); using raw frame",
                         e)
-            return img.GetNDArray()
+            return np.array(img.GetNDArray(), copy=True)
 
     def _apply_initial_config(self) -> None:
         cfg = self.config
@@ -279,15 +324,25 @@ class SpinnakerCameraDriver(CameraDriver):
             except (AttributeError, self._pyspin.SpinnakerException) as e:
                 log.warning("Could not set device PixelFormat=%s: %s",
                             dev_fmt, e)
+        # Reset any persisted ROI offset before resizing: a full-frame
+        # Width/Height can otherwise exceed (sensor - offset) and be rejected.
+        for off in ("OffsetX", "OffsetY"):
+            try:
+                node = getattr(self._cam, off)
+                node.SetValue(node.GetMin())   # min is the canonical reset (== 0)
+            except (AttributeError, self._pyspin.SpinnakerException):
+                pass
         if cfg.supports(CameraFeature.RESOLUTION) and cfg.resolution:
             self.set_config("width", cfg.resolution[0])
             self.set_config("height", cfg.resolution[1])
-        if cfg.supports(CameraFeature.FRAME_RATE) and cfg.fps:
-            self.set_config("fps", cfg.fps)
+        # Exposure/gain BEFORE frame rate: the valid AcquisitionFrameRate range
+        # depends on the exposure time, so the rate must be set last.
         if cfg.supports(CameraFeature.EXPOSURE) and cfg.exposure_us:
             self.set_config("exposure_us", cfg.exposure_us)
         if cfg.supports(CameraFeature.GAIN) and cfg.gain_db is not None:
             self.set_config("gain_db", cfg.gain_db)
+        if cfg.supports(CameraFeature.FRAME_RATE) and cfg.fps:
+            self.set_config("fps", cfg.fps)
 
     @staticmethod
     def _resolve(attribute: str):

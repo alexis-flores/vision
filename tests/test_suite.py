@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 import cv2
@@ -24,14 +25,14 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT) # root scripts (run_hardware)
 sys.path.insert(0, os.path.join(_ROOT, "src")) # the `vision` package (src layout)
 
-from vision.camera_driver import (CameraError, CameraTimeoutError,
-                           FeatureNotSupportedError, MalformedFrameError)
+from vision.camera_driver import (CameraError, FeatureNotSupportedError,
+                           MalformedFrameError)
 from vision.camera_service import CameraService
 from vision.camera_types import (CameraConfig, CameraFeature, CameraFrame,
                           CameraStatus, PixelFormat)
-from vision.centroid_buffer import CentroidRingBuffer, RxTimebase
+from vision.centroid_buffer import CentroidRingBuffer
 from vision.centroid_extraction import CentroidExtractor, ExtractorParams
-from vision.centroid_types import Centroid, CentroidProfile
+from vision.centroid_types import CentroidProfile
 from vision.config_loader import ConfigError, load_camera_config, load_camera_configs
 from vision.frame_buffers import CircularFrameBuffer, FIFOFrameBuffer
 from vision.generic_driver import GenericCameraDriver
@@ -422,6 +423,27 @@ class TestVisionEndToEnd(unittest.TestCase): # IT-002
         self.assertGreater(gui_hits["n"], 0) # FR-004 / NFR-008
         # The simulated camera has 5 spots; profiles should carry centroids.
         self.assertTrue(any(p.n_centroids > 0 for p in consumed))
+        # Queuing telemetry must reflect the centroids it drained.
+        self.assertGreater(q.profiles_consumed, 0)
+        self.assertGreater(q.centroids_consumed, 0)
+        self.assertEqual(q.centroids_consumed,
+                         sum(p.n_centroids for p in consumed))
+
+    def test_latency_budget_exceeded_counted(self): # NFR-002 telemetry
+        ring = CircularFrameBuffer(8)
+        cring = CentroidRingBuffer(8)
+        vision = VisionSystem(
+            ring, cring,
+            extractor=CentroidExtractor(
+                ExtractorParams(threshold=60, min_area=6)),
+            latency_budget_us=0.0)   # any real extraction exceeds a 0us budget
+        ring.push(CameraFrame(data=make_spot_image(spots=((40, 40),)),
+                              timestamp=time.monotonic(), frame_id=1))
+        vision.start()
+        time.sleep(0.2)
+        vision.stop()
+        self.assertGreater(vision.frames_processed, 0)
+        self.assertGreater(vision.latency_budget_exceeded, 0)
 
     def test_invalid_frame_skipped(self): # NFR-006 in vision
         ring = CircularFrameBuffer(8)
@@ -482,6 +504,68 @@ class TestLensCalculator(unittest.TestCase):
             angular_fov_deg(4.968, 0.0)
         with self.assertRaises(ValueError):
             focal_length_mm(6.4, 100.0, 0.0)
+        with self.assertRaises(ValueError):
+            linear_fov_mm(4.968, 0.0, 1000.0)
+        with self.assertRaises(ValueError):
+            working_distance_mm(4.968, 0.0, 100.0)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Extractor fallbacks when OpenCV is unavailable (scipy / channel-mean path)
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestExtractorFallbacks(unittest.TestCase):
+    def test_mono_scipy_fallback(self):
+        import vision.centroid_extraction as ce
+        img = make_spot_image(spots=((73, 128),))
+        with mock.patch.object(ce, "_HAVE_CV2", False):
+            cents = ce.CentroidExtractor(
+                ce.ExtractorParams(threshold=60, min_area=6)).extract(img)
+        self.assertEqual(len(cents), 1)
+
+    def test_color_channel_mean_fallback(self):
+        import vision.centroid_extraction as ce
+        bgr = cv2.cvtColor(make_spot_image(spots=((73, 128),)),
+                           cv2.COLOR_GRAY2BGR)
+        with mock.patch.object(ce, "_HAVE_CV2", False):
+            cents = ce.CentroidExtractor(
+                ce.ExtractorParams(threshold=60, min_area=6)).extract(bgr)
+        self.assertEqual(len(cents), 1)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Regression tests (bugs found in review)
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+class TestRegressions(unittest.TestCase):
+    def test_fifo_pop_zero_timeout_is_nonblocking(self):
+        # gui_bridge._poll drains with pop(timeout=0); it must return None on an
+        # empty queue instead of blocking forever (which froze the GUI).
+        q = FIFOFrameBuffer(capacity=2)
+        done = threading.Event()
+        result = {}
+
+        def drain():
+            result["v"] = q.pop(timeout=0)
+            done.set()
+
+        threading.Thread(target=drain, daemon=True).start()
+        self.assertTrue(done.wait(timeout=1.0), "pop(timeout=0) blocked on empty")
+        self.assertIsNone(result["v"])
+
+    def test_extract_handles_float_image(self):
+        # _to_gray_u8 must not bit-shift a float image to zero.
+        img = make_spot_image(spots=((73, 128),)).astype(np.float32)
+        ex = CentroidExtractor(ExtractorParams(threshold=60, min_area=6))
+        self.assertEqual(len(ex.extract(img)), 1)
+
+    def test_bad_pixel_format_raises_config_error(self):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.write(fd, json.dumps({"name": "x", "pixel_format": "BadFmt"}).encode())
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        with self.assertRaises(ConfigError):
+            load_camera_config(path)
 
 
 # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵

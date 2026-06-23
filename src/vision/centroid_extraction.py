@@ -52,7 +52,6 @@ deliberately as part of the handoff.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -129,9 +128,12 @@ class CentroidExtractor:
                 gray = image[..., :3].mean(axis=2)
         else:
             gray = image
-        if gray.dtype != np.uint8: # scale Mono16 etc. to 8-bit
-            shift = max(0, gray.itemsize * 8 - 8)
-            gray = (gray.astype(np.uint32) >> shift).astype(np.uint8)
+        if gray.dtype != np.uint8:
+            if np.issubdtype(gray.dtype, np.integer): # scale Mono16 etc. to 8-bit
+                shift = max(0, gray.itemsize * 8 - 8)
+                gray = (gray.astype(np.uint32) >> shift).astype(np.uint8)
+            else: # float (e.g. no-cv2 channel mean): clip + cast, don't bit-shift
+                gray = np.clip(gray, 0, 255).astype(np.uint8)
         return np.ascontiguousarray(gray)
 
     def _binarize(self, gray: np.ndarray) -> np.ndarray:
@@ -148,8 +150,10 @@ class CentroidExtractor:
                 _, mask = cv2.threshold(gray, p.threshold, 255, thr_type)
             return mask
         thr = p.threshold if p.threshold >= 0 else int(gray.mean() + gray.std())
-        mask = (gray <= thr) if p.invert else (gray >= thr)
-        return mask.astype(np.uint8) * 255
+        # Match cv2 THRESH_BINARY semantics: strict '>' (and inclusive '<=' for
+        # the inverted case), so the no-OpenCV fallback agrees at the boundary.
+        binmask = (gray <= thr) if p.invert else (gray > thr)
+        return binmask.astype(np.uint8) * 255
 
     def _extract_cpu(self, image: np.ndarray) -> List[Centroid]:
         gray = self._to_gray_u8(image)
@@ -300,10 +304,10 @@ class CentroidExtractor:
                 return self._components_cv2(gray, mask)
             return self._components_scipy(gray, mask)
         # cv2.cuda preprocessing
-        gpu = cv2.cuda_GpuMat()
+        gpu = cv2.cuda_GpuMat()  # type: ignore[attr-defined]
         gpu.upload(image)
         if image.ndim == 3:
-            gpu = cv2.cuda.cvtColor(gpu, cv2.COLOR_BGR2GRAY)
+            gpu = cv2.cuda.cvtColor(gpu, cv2.COLOR_BGR2GRAY)  # type: ignore[attr-defined]
         gray = gpu.download()
         mask = self._binarize(gray)
         return self._components_cv2(gray, mask)

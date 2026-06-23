@@ -87,7 +87,7 @@ def _config_from_dict(d: Dict[str, Any]) -> CameraConfig:
                 data[tup_key] = tuple(data[tup_key])
         cfg = CameraConfig(features=features,
                            pixel_format=pixel_format, **data)
-    except TypeError as e:
+    except (TypeError, ValueError) as e:
         raise ConfigError(f"Invalid configuration field: {e}") from e
     log.info("Loaded camera config %r (%s)", cfg.name, cfg.model)
     return cfg

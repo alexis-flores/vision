@@ -1,12 +1,12 @@
-# Core runtime dependencies for the vision system (camera backend + centroid
-# pipeline). These are sufficient to run main.py and the test suite.
+# Core runtime dependencies for the vision system (camera backend + frame
+# serving). These are sufficient to run main.py and the test suite.
 #
-# Optional extras (GUI, YAML configs, GPU, real hardware) are declared in
+# Optional extras (GUI, YAML configs, real hardware) are declared in
 # pyproject.toml under [project.optional-dependencies]. Install them with:
 #     pip install -e ".[gui]"      # PyQt6 live viewer
 #     pip install -e ".[yaml]"     # YAML config files
-#     pip install -e ".[gpu]"      # CuPy GPU extraction path (FR-005)
 #     pip install -e ".[dev]"      # test/lint tooling
+#     pip install -e ".[all]"      # all of the above
 #
 # Note: the FLIR/Teledyne Spinnaker SDK (PySpin), required by
 # spinnaker_driver.py for real BlackFly hardware, is NOT on PyPI. Install it

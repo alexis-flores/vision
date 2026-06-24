@@ -67,6 +67,16 @@ class SpinnakerCameraDriver(CameraDriver):
             if self.config.serial:
                 self._cam = cam_list.GetBySerial(self.config.serial)
             else:
+                # Index-based selection is NOT stable across a USB
+                # re-enumeration (unplug/replug or backend crash), so reconnect
+                # (NFR-005) can bind to a stale/not-ready handle. Selecting by
+                # serial deterministically re-binds to the same physical unit.
+                log.warning(
+                    "Camera %r has no 'serial' configured; selecting by "
+                    "device_index=%d. Reconnect across USB re-enumeration "
+                    "(NFR-005) may be unreliable — set 'serial' in the config "
+                    "(or pass --serial) to bind to a specific unit.",
+                    self.config.name, self.config.device_index)
                 self._cam = cam_list.GetByIndex(self.config.device_index)
             cam_list.Clear()
 

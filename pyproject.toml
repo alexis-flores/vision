@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vision-system"
-version = "1.0.0"
-description = "Real-time camera backend and centroid-extraction pipeline (SRS implementation)"
+version = "2.0.0"
+description = "Real-time camera backend and frame-serving pipeline (SRS v0.2 implementation)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Proprietary" }
 
-# Core runtime: camera abstraction, service layer, buffers, and the CPU
-# centroid extractor. Mirrors requirements.txt.
+# Core runtime: camera abstraction, service layer, frame buffers, and the
+# OpenCV camera backend. Mirrors requirements.txt.
 dependencies = [
     "numpy>=1.24",
     "opencv-python-headless>=4.6",
@@ -24,14 +24,6 @@ gui = ["PyQt6>=6.4"]
 # YAML camera configs (config_loader.py reads these lazily if present).
 yaml = ["PyYAML>=6.0"]
 
-# GPU-accelerated extraction path (centroid_extraction.py, FR-005). Falls back
-# to CPU automatically when unavailable; pick the CuPy wheel for your CUDA
-# version (e.g. cupy-cuda12x) if this metapackage does not resolve.
-gpu = ["cupy>=12.0"]
-
-# scipy provides the connected-components fallback used when OpenCV is absent.
-scipy = ["scipy>=1.10"]
-
 # Test / development + QA tooling.
 dev = [
     "pytest>=7.0",
@@ -40,13 +32,11 @@ dev = [
     "coverage>=7.0",
     "mypy>=1.0",
     "ruff>=0.1",
-    "scipy>=1.10",
 ]
 
-# Everything pip-installable in one shot: GUI + YAML + scipy + test tooling.
-# (GPU/cupy is excluded since it needs a CUDA-matched wheel; add ".[gpu]"
-# separately. PySpin is a vendor SDK, not on PyPI — install it separately for
-# real BlackFly hardware.)
+# Everything pip-installable in one shot: GUI + YAML + test tooling.
+# (PySpin is a vendor SDK, not on PyPI — install it separately for real
+# BlackFly hardware.)
 all = ["vision-system[gui,yaml,dev]"]
 
 # NOTE: the FLIR/Teledyne Spinnaker SDK (PySpin), required by

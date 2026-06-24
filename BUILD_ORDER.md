@@ -8,8 +8,13 @@ possible** — then enrich it layer by layer.
 You're rebuilding the package `vision` (in `src/vision/`) plus the root scripts
 (`main.py`, `gui_bridge.py`, `run_hardware.py`) and `tests/`.
 
-> Tip: after each phase, *run something*. Seeing a frame flow, a centroid get
-> extracted, or a test go green is what turns "I copied code" into "I get it."
+> **Scope note (SRS v0.2).** The vision system *serves frames*; it does not
+> extract centroids or run image processing — that moved to the downstream
+> cueing system. So there is a single "spine" here (camera → frames →
+> consumers), not two. The `CueingSystem` you build is a thin frame consumer.
+
+> Tip: after each phase, *run something*. Seeing a frame flow, a sink receive
+> it, or a test go green is what turns "I copied code" into "I get it."
 
 ---
 
@@ -21,19 +26,15 @@ camera_types ──┬─> camera_driver ──┬─> generic_driver
                │                   └─> spinnaker_driver
                ├─> config_loader
                ├─> frame_buffers ──┐
-               └──────────────┐    │
-                              camera_service  (also uses config_loader)
-centroid_types ─┬─> centroid_extraction
-                └─> centroid_buffer
-camera_types + centroid_* + frame_buffers ─> vision_system
-centroid_buffer + centroid_types ─> queuing_subsystem
-camera_types + frame_buffers ─> gui_bridge (CameraViewer)
+               │                   ├─> camera_service  (also uses config_loader)
+               │                   └─> cueing_system
+               └─> gui_bridge (CameraViewer, also uses frame_buffers)
 lens  (standalone — depends on nothing)
 ```
 
-Two independent "spines" (camera/frame side, and centroid side) meet at
-`vision_system`. Build the camera spine first, get it running with the
-simulator, then build the centroid spine, then join them.
+One spine: the camera service *produces* frames into buffers; the cueing system
+and the GUI *consume* them. Build the driver + service first, get it running with
+the simulator, then add the consumers.
 
 ---
 
@@ -48,8 +49,8 @@ simulator, then build the centroid spine, then join them.
    config/
    ```
 2. Minimal `pyproject.toml` with `name`, `requires-python`, deps
-   (`numpy`, `opencv-python-headless`) and a `src` package find. You can flesh
-   out the optional extras (`gui`, `dev`, `all`) later.
+   (`numpy`, `opencv-python-headless`) and a `src` package find. Flesh out the
+   optional extras (`gui`, `dev`, `all`) later.
 3. `python -m venv .venv && pip install -e .` so `import vision` works.
 
 **Concept:** the `src/` layout — why the package lives under `src/` and why you
@@ -140,13 +141,14 @@ feature-name parsing, a `ConfigError`, and tuple/enum conversion.
 
 **Write:**
 - `FrameSink` (a `Protocol` with `.push`).
-- `CircularFrameBuffer` — fixed capacity, overwrites oldest (vision wants the
-  *freshest* frame), blocking `pop`.
-- `FIFOFrameBuffer` — bounded queue, drop-*newest* on full (GUI wants ordered
-  playback without unbounded memory).
+- `CircularFrameBuffer` — fixed capacity, overwrites oldest (the cueing system
+  wants the *freshest* frame), blocking `pop`.
+- `FIFOFrameBuffer` — bounded queue, drop-*newest* on full (the GUI wants
+  ordered playback without unbounded memory).
 
 **Concepts:** the two opposite drop policies and *why each fits its consumer*;
 `Condition`/`Queue` for thread-safe hand-off; duck-typed sinks via `Protocol`.
+Note `pop(timeout=0)` must be non-blocking (the GUI drains with it).
 
 **Checkpoint:** push more than capacity into each, confirm the drop counts and
 ordering match your expectation.
@@ -175,109 +177,66 @@ stream for half a second → confirm frames arrive. Then call
 
 ---
 
-## Phase 5 — The centroid spine (the actual vision work)
+## Phase 5 — The downstream consumer + first full pipeline
 
-### 7. `centroid_types.py`
-**Why now:** the output vocabulary. Independent of everything else.
+### 7. `cueing_system.py`
+**Why now:** the consumer side of the handoff. It drains the
+`CircularFrameBuffer` on its own thread (concurrent with the camera worker,
+NFR-007) and hands each frame to a pluggable `frame_processor` callback.
 
-**Write:** `Centroid` (frozen: `x, y, intensity, peak, area, bbox`) and
-`CentroidProfile` (per-frame list + `seq_id`, `frame_id`, timestamps,
-`proc_latency_us`). This is the **handoff unit** to downstream systems.
+**Write:** `CueingSystem` worker thread + `_run`. Keep it thin: the actual cueing
+pipeline (centroid extraction, tracking, state estimation, pixel→angular cue) is
+**out of scope / undefined in the SRS** — leave it as the `frame_processor` hook
+and don't invent a data schema for it.
 
-### 8. `centroid_extraction.py`
-**Why now:** the core algorithm (FR-003). Depends only on `centroid_types`.
+**Concepts:** producer/consumer decoupling via a buffer; skip-and-continue on
+processor errors (NFR-006); clean thread shutdown.
 
-**Write:** `ExtractorParams` and `CentroidExtractor.extract(image) ->
-list[Centroid]`: grayscale → threshold → contour/connected-components →
-intensity-weighted sub-pixel centroid + area filter. Add the optional GPU path
-with CPU fallback (FR-005) last.
-
-**Concepts:** sub-pixel centroiding (center of mass), why contour tracing is
-faster than full connected-components for sparse spots, the ~5 ms latency
-budget (NFR-002).
-
-**Checkpoint:** make a test image with two white circles, extract, confirm the
-centroids land on the circle centers. Time 100 runs — you should be well under
-5 ms.
-
-### 9. `centroid_buffer.py`
-**Why now:** the thread-safe transport (SRS 5.2, NFR-007) carrying
-`CentroidProfile`s from the vision worker to the queuing worker.
-
-**Write:** `RxTimebase` and `CentroidRingBuffer` with independent read/write
-pointers, `push` (overwrites oldest unread, counts drops), blocking `pop`, and
-`wake_all` for shutdown.
-
-**Concepts:** lock + `Condition`, independent producer/consumer pointers,
-overwrite-on-lap semantics.
-
-**Checkpoint:** the concurrency test — one thread pushing N items, another
-popping, assert no duplicates/deadlock.
-
----
-
-## Phase 6 — Join the spines + first full pipeline
-
-### 10. `vision_system.py`
-**Why now:** this is where the two spines meet. Pulls a `CameraFrame` from a
-`CircularFrameBuffer`, runs the extractor, wraps results in a `CentroidProfile`,
-pushes to the `CentroidRingBuffer`, and (optionally) calls a non-blocking GUI
-callback (FR-004/NFR-008). Skips bad frames instead of crashing (NFR-006);
-measures and logs latency (NFR-002).
-
-**Write:** `VisionSystem` worker thread + `_process`. Note the
-`getattr(extractor, "backend", "custom")` — the extractor contract is just
-`extract()`.
-
-### 11. `queuing_subsystem.py`
-**Why now:** the downstream consumer — drains the centroid ring on its own
-thread and hands each profile to a sink callback.
-
-### 12. `main.py` (root script)
-**Why now:** wire everything with the simulator and **see the whole SRS
+### 8. `main.py` (root script)
+**Why now:** wire everything with the simulator and **see the whole SRS v0.2
 dataflow run headless**, including the injected malformed frames and backend
-crash.
+crash. The service fans frames out to a `CircularFrameBuffer` (→ cueing) and a
+`FIFOFrameBuffer` (→ GUI).
 
 **Checkpoint (the big one):** `python main.py` → watch the run summary:
-frames processed, centroids, reconnects, drops. You've now built the entire core
-pipeline.
+frames delivered, cueing consumed, reconnects, drops. You've now built the
+entire core pipeline.
 
 ---
 
-## Phase 7 — Visualization
+## Phase 6 — Visualization
 
-### 13. `gui_bridge.py` (root script)
+### 9. `gui_bridge.py` (root script)
 **Why now:** a PyQt6 `CameraViewer` that polls a `FIFOFrameBuffer` every 33 ms
-and repaints — the demand-driven, never-blocks GUI (FR-004, SRS 5.4). Two
-wirings: raw frames straight from the service, or annotated frames via the
-vision `gui_callback`.
+and repaints — the demand-driven, never-blocks GUI (FR-004, NFR-008, SRS 5.4).
+The service pushes raw frames straight into the FIFO sink.
 
-**Checkpoint:** `python gui_bridge.py` → a live window with centroid markers on
-the simulated spots.
+**Checkpoint:** `python gui_bridge.py` → a live window showing the simulated
+camera feed.
 
 ---
 
-## Phase 8 — Real hardware backends
+## Phase 7 — Real hardware backends
 
-### 14. `opencv_driver.py`
+### 10. `opencv_driver.py`
 **Why now:** your first *real* camera (any webcam) — a gentle hardware step. A
 capture thread feeds a latest-frame slot; `read_frame` waits on a condition with
 a timeout (OpenCV has no native blocking-with-timeout).
 
-### 15. `spinnaker_driver.py`
+### 11. `spinnaker_driver.py`
 **Why now:** the BlackFly S backend (PySpin). Lazy-imports PySpin so the rest of
 the package runs without the SDK. Note the color path (BayerRG8 → BGR8 via
 `ImageProcessor`), `AcquisitionMode=Continuous`, and `NewestOnly` buffering.
 
-### 16. `run_hardware.py` (root script)
+### 12. `run_hardware.py` (root script)
 **Why now:** the production entry point — same pipeline as `main.py` but with
 `SpinnakerCameraDriver` and the live viewer, no fault injection.
 
 ---
 
-## Phase 9 — Optics helper (anytime — it's standalone)
+## Phase 8 — Optics helper (anytime — it's standalone)
 
-### 17. `lens.py`
+### 13. `lens.py`
 Independent of everything (just `math`). Implements the FLIR lens formulas:
 angular FOV, linear FOV at a working distance, and focal-length selection. You
 can write this whenever; it informs the `lens_fov_deg` you put in a config but
@@ -285,33 +244,35 @@ has **no runtime dependency** on the rest.
 
 ---
 
-## Phase 10 — Tests + packaging (ideally write tests *as you go*)
+## Phase 9 — Tests + packaging (ideally write tests *as you go*)
 
-### 18. `tests/test_suite.py`
-The best way to learn is to write each test right after its module (config load,
-driver lifecycle, extractor accuracy + latency, ring-buffer concurrency, frame
-buffers, service malformed-skip/reconnect, the end-to-end vision→queuing flow,
-the lens math, and the hardware smoke test that skips without a camera).
+### 14. `tests/`
+The best way to learn is to write each test right after its module: config load,
+driver lifecycle + feature gating (`test_suite.py`), the real-hardware driver
+logic via fake PySpin/cv2 (`test_drivers_mocked.py`), frame-buffer invariants
+(`test_properties.py`), the service malformed-skip/reconnect, the vision→cueing
+handoff, the lens math, and the hardware smoke test that skips without a camera.
 
-### 19. Finish `pyproject.toml` / `requirements.txt`
-Optional-dependency extras (`gui`, `yaml`, `gpu`, `dev`, `all`), and confirm
+### 15. Finish `pyproject.toml` / `requirements.txt`
+Optional-dependency extras (`gui`, `yaml`, `dev`, `all`), and confirm
 `pip install -e ".[all]"` + `python -m unittest discover -s tests` is green.
 
 ---
 
 ## The mental model to keep in your head while building
 
-- **Two producers/consumers chained by buffers:** the camera worker *produces*
-  frames; the vision worker *consumes* frames and *produces* centroid profiles;
-  the queuing worker *consumes* profiles. Buffers decouple their speeds.
-- **Three threads** (per camera): camera worker, vision worker, queuing worker —
-  plus the GUI thread. Everything shared between them goes through a thread-safe
-  buffer.
+- **One producer, several consumers, decoupled by buffers:** the camera worker
+  *produces* frames; the cueing worker and the GUI *consume* them. Buffers absorb
+  speed differences and pick a drop policy that fits each consumer.
+- **Threads** (per camera): the camera worker and the cueing worker — plus the
+  GUI thread. Everything shared between them goes through a thread-safe buffer.
 - **Errors are data, not crashes:** the exception *type* chosen in the driver
-  decides whether the service skips one frame or tries to reconnect.
+  decides whether the service skips one frame (malformed) or tries to reconnect
+  (backend fault).
 - **Interfaces decouple:** the `CameraDriver` ABC means the pipeline never knows
-  if it's talking to a simulator, a webcam, or a BlackFly; the extractor
-  contract (`extract() -> list[Centroid]`) means the algorithm is swappable.
+  if it's talking to a simulator, a webcam, or a BlackFly; the cueing
+  `frame_processor` hook means the (future) processing pipeline is swappable
+  without touching the vision system.
 
 Build the simulator early, keep `main.py` runnable, and add a test per module —
 that's the fastest path from "typed it out" to "I understand why it's shaped

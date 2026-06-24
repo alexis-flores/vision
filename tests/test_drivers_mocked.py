@@ -33,6 +33,7 @@ from vision.camera_types import (CameraConfig, CameraFeature, CameraStatus,
 def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
                       frame_hw=(1080, 1440, 3)):
     PySpin = types.ModuleType("PySpin")
+    PySpin._select = {"mode": None, "arg": None}  # records GetBySerial vs GetByIndex
 
     class SpinnakerException(Exception):
         def __init__(self, msg="err", errorcode=-1):
@@ -127,8 +128,10 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
 
     class CamList:
         def GetSize(self): return 1
-        def GetBySerial(self, s): return cam
-        def GetByIndex(self, i): return cam
+        def GetBySerial(self, s):
+            PySpin._select.update(mode="serial", arg=s); return cam
+        def GetByIndex(self, i):
+            PySpin._select.update(mode="index", arg=i); return cam
         def Clear(self): pass
 
     class System:
@@ -142,9 +145,9 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
     return PySpin
 
 
-def _bfs_config():
+def _bfs_config(serial=None):
     return CameraConfig(
-        name="bfs", model="BFS-U3-16S2C-CS", device_index=0,
+        name="bfs", model="BFS-U3-16S2C-CS", device_index=0, serial=serial,
         max_resolution=(1440, 1080), max_fps=226.0,
         resolution=(1440, 1080), fps=60.0, exposure_us=5000.0, gain_db=0.0,
         pixel_format=PixelFormat.BGR8,
@@ -155,12 +158,12 @@ def _bfs_config():
 
 
 class TestSpinnakerDriverMocked(unittest.TestCase):
-    def _install(self, **kw):
+    def _install(self, serial=None, **kw):
         fake = _make_fake_pyspin(**kw)
         sys.modules["PySpin"] = fake
         self.addCleanup(lambda: sys.modules.pop("PySpin", None))
         from vision.spinnaker_driver import SpinnakerCameraDriver
-        return fake, SpinnakerCameraDriver(_bfs_config())
+        return fake, SpinnakerCameraDriver(_bfs_config(serial=serial))
 
     def test_connect_stream_read_color(self):
         fake, drv = self._install()
@@ -213,6 +216,23 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         drv.connect(); drv.start_stream()
         with self.assertRaises(MalformedFrameError):
             drv.read_frame(timeout=0.5)
+
+    def test_no_serial_warns_and_selects_by_index(self):  # NFR-005 footgun
+        # Without a serial, selection falls back to device_index, which is not
+        # stable across USB re-enumeration; the driver must warn about it.
+        fake, drv = self._install()  # _bfs_config(serial=None)
+        with self.assertLogs("vision.spinnaker_driver", level="WARNING") as cm:
+            drv.connect()
+        self.assertTrue(any("serial" in m.lower() for m in cm.output))
+        self.assertEqual(fake._select["mode"], "index")
+        drv.disconnect()
+
+    def test_serial_selects_by_serial(self):  # NFR-005 stable rebind
+        fake, drv = self._install(serial="BFS123456")
+        drv.connect()
+        self.assertEqual(fake._select["mode"], "serial")
+        self.assertEqual(fake._select["arg"], "BFS123456")
+        drv.disconnect()
 
 
 # --------------------------------------------------------------------------- #

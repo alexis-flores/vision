@@ -149,13 +149,20 @@ python app.py --backend opencv --device 0       # webcam + viewer
 python app.py --headless --seconds 10           # any backend, no GUI + stats
 python app.py --headless --inject-faults        # sim NFR-005/006 demo
 python app.py --no-cueing                       # display-only: frames -> GUI, no cueing
+python app.py --backend spinnaker --exposure 12000 --gain 0   # tune brightness live
 ```
+
+Exposure/gain/fps overrides apply at connect; the live HUD shows the resulting
+exposure and gain so you can dial in "normal" brightness while watching the feed.
 | Flag | Default | Description |
 |---|---|---|
 | `--backend {sim,opencv,spinnaker}` | `sim` | which camera driver to run |
 | `--config PATH` | built-in (BFS config for spinnaker) | camera config JSON |
 | `--serial S` | from config | spinnaker: bind to a specific camera serial (recommended for NFR-005) |
 | `--device N` | `0` | opencv: capture device index |
+| `--exposure US` | from config | exposure time in microseconds (overrides config; must be ≤ 1/fps) |
+| `--gain DB` | from config | gain in dB (overrides config) |
+| `--fps F` | from config | frame rate (overrides config) |
 | `--headless` | off | no GUI; stream and log stats for `--seconds` |
 | `--seconds N` | `10.0` | headless run duration (seconds) |
 | `--inject-faults` | off | sim only: inject malformed frames + a crash to demo NFR-006/NFR-005 |

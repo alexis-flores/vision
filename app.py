@@ -55,6 +55,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
                     help="spinnaker: bind to this camera serial (recommended)")
     ap.add_argument("--device", type=int, default=0,
                     help="opencv: capture device index (default: 0)")
+    ap.add_argument("--exposure", type=float, default=None,
+                    help="exposure time in microseconds (overrides config)")
+    ap.add_argument("--gain", type=float, default=None,
+                    help="gain in dB (overrides config)")
+    ap.add_argument("--fps", type=float, default=None,
+                    help="frame rate (overrides config)")
     ap.add_argument("--headless", action="store_true",
                     help="no GUI; stream and log stats for --seconds")
     ap.add_argument("--seconds", type=float, default=10.0,
@@ -68,18 +74,25 @@ def _parse_args(argv=None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def _make_driver(backend: str, cfg: CameraConfig, serial=None):
-    """Construct the driver for `backend`. PySpin is imported only here, only
-    when needed, so the SDK stays optional."""
-    if backend == "sim":
+def _make_driver(args: argparse.Namespace, cfg: CameraConfig):
+    """Construct the driver for the chosen backend, applying CLI overrides
+    (None = keep the config value). PySpin is imported only here, only when
+    needed, so the SDK stays optional."""
+    if args.serial:
+        cfg.serial = args.serial
+    if args.exposure is not None:
+        cfg.exposure_us = args.exposure
+    if args.gain is not None:
+        cfg.gain_db = args.gain
+    if args.fps is not None:
+        cfg.fps = args.fps
+    if args.backend == "sim":
         from vision.generic_driver import GenericCameraDriver
         return GenericCameraDriver(cfg, n_spots=6)
-    if backend == "opencv":
+    if args.backend == "opencv":
         from vision.opencv_driver import OpenCVCameraDriver
         return OpenCVCameraDriver(cfg)
     from vision.spinnaker_driver import SpinnakerCameraDriver
-    if serial:
-        cfg.serial = serial
     return SpinnakerCameraDriver(cfg)
 
 
@@ -104,10 +117,10 @@ def _build_service(args: argparse.Namespace):
         config = DEFAULT_SPINNAKER_CONFIG  # spinnaker needs a real device config
     if config:
         names = svc.add_cameras_from_config(
-            config, lambda c: _make_driver(args.backend, c, args.serial))
+            config, lambda c: _make_driver(args, c))
         return svc, names[0]
     cfg = _default_config(args.backend, args.device)
-    svc.add_camera(cfg.name, _make_driver(args.backend, cfg, args.serial))
+    svc.add_camera(cfg.name, _make_driver(args, cfg))
     return svc, cfg.name
 
 

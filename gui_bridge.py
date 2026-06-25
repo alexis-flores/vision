@@ -93,6 +93,8 @@ class CameraViewer(QMainWindow):
         self._cam_fps = 0.0
         self._prev_delivered: Optional[int] = None
         self._temp: Optional[float] = None
+        self._exposure: Optional[float] = None   # us
+        self._gain: Optional[float] = None        # dB
         self._malformed = 0
         self._reconnects = 0
         self._lost: Optional[int] = None
@@ -174,6 +176,8 @@ class CameraViewer(QMainWindow):
         self._malformed = st.get("malformed_frames", self._malformed)
         self._reconnects = st.get("reconnects", self._reconnects)
         self._temp = health.get("temperature_c", self._temp)
+        self._exposure = health.get("exposure_us", self._exposure)
+        self._gain = health.get("gain_db", self._gain)
         if "StreamLostFrameCount" in health:
             self._lost = health["StreamLostFrameCount"]
         self._last_refresh = now
@@ -187,10 +191,17 @@ class CameraViewer(QMainWindow):
                      "#E6B53C" if self._temp < 75 else "#E05A5A")
             temp = (f'<br><span style="color:{color}">&#9679; '
                     f'{self._temp:.1f} &deg;C</span>')
+        settings = ""
+        if self._exposure is not None:
+            settings = (f'<br><span style="color:#9AA0A6">exp '
+                        f'{self._exposure / 1000:.1f} ms')
+            if self._gain is not None:
+                settings += f' &middot; gain {self._gain:.0f} dB'
+            settings += "</span>"
         self._hud.setText(
             f'<b>{frame.camera_name or "camera"}</b>'
             f'<span style="color:#9AA0A6">&nbsp;&nbsp;{w}&times;{h}</span>'
-            f'<br>GUI {self._disp_fps:.0f}{cam} fps{temp}')
+            f'<br>GUI {self._disp_fps:.0f}{cam} fps{temp}{settings}')
         self._hud.adjustSize()
         self._hud.show()
         self._hud.raise_()

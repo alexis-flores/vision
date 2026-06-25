@@ -286,6 +286,17 @@ class SpinnakerCameraDriver(CameraDriver):
                     health[name] = val
         except self._pyspin.SpinnakerException as e:
             log.debug("Stream statistics read failed: %s", e)
+        # Live acquisition settings (tuning feedback for the GUI).
+        for key, node_name in (("exposure_us", "ExposureTime"),
+                               ("gain_db", "Gain"),
+                               ("fps", "AcquisitionFrameRate")):
+            node = getattr(self._cam, node_name, None)
+            if node is None:
+                continue
+            try:
+                health[key] = float(node.GetValue())
+            except self._pyspin.SpinnakerException as e:
+                log.debug("%s read failed: %s", node_name, e)
         return health
 
     def _read_int_node(self, nodemap, name: str) -> Optional[int]:

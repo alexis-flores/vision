@@ -61,7 +61,7 @@ class TestCameraViewer(unittest.TestCase):
     def test_renders_with_telemetry(self):
         fifo = FIFOFrameBuffer(4)
         fifo.push(_frame(1, color=True))   # exercises the BGR path
-        health = {"temperature_c": 41.5}
+        health = {"temperature_c": 41.5, "exposure_us": 10000.0, "gain_db": 0.0}
         stats = {"frames_delivered": 30, "malformed_frames": 0, "reconnects": 0}
         win = gui_bridge.CameraViewer(
             fifo, title="cam", poll_ms=10,
@@ -75,6 +75,8 @@ class TestCameraViewer(unittest.TestCase):
         self.assertIn("GUI", hud)          # display FPS, labeled
         self.assertIn("CAM", hud)          # camera FPS, labeled
         self.assertIn("41.5", hud)         # device temperature
+        self.assertIn("exp", hud)          # exposure
+        self.assertIn("10.0 ms", hud)      # exposure value (10000 us -> 10.0 ms)
         self.assertIn("frame 1", win.statusBar().currentMessage())
 
     def test_works_without_callbacks_and_mono(self):

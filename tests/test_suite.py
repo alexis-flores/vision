@@ -469,6 +469,10 @@ class TestScriptsImport(unittest.TestCase):
         self.assertEqual(ns2.serial, "21512345")
         self.assertFalse(ns.no_cueing)                         # default: cueing on
         self.assertTrue(app._parse_args(["--no-cueing"]).no_cueing)
+        ns3 = app._parse_args(["--exposure", "12000", "--gain", "3", "--fps", "30"])
+        self.assertEqual(ns3.exposure, 12000.0)
+        self.assertEqual(ns3.gain, 3.0)
+        self.assertEqual(ns3.fps, 30.0)
 
     def test_hardware_acceptance_imports(self):
         import hardware_acceptance

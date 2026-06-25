@@ -72,13 +72,16 @@ After `pip install -e .` the library is importable as, e.g.,
 | `frame_buffers.py` | `CircularFrameBuffer` (→ cueing), `FIFOFrameBuffer` (→ GUI) | 5.6, NFR-007/008 |
 | `camera_service.py` | Multi-camera mgmt, worker threads, reconnect, frame fan-out | FR-002, NFR-005/006 |
 | `cueing_system.py` | Downstream **frame consumer** stand-in (pluggable processor hook) | 5.1 dataflow |
+| `acceptance.py` | Automated acceptance battery (objective PASS/FAIL checks + report) | 7 (qualification) |
 | `lens.py` | Lens/FOV calculators (FLIR app-note: angular + linear FOV) | NFR-004 |
 | `gui_bridge.py` | PyQt viewer, 33 ms demand-driven poll | FR-004, NFR-011, 5.4 |
 | `main.py` | Headless end-to-end demo on the simulator (incl. NFR-005/006 fault injection) | — |
 | `run_hardware.py` | Full pipeline on a real BlackFly S (Spinnaker) + PyQt viewer | — |
+| `hardware_acceptance.py` | Acceptance/qualification CLI for a real camera (exit 0/1) | 7 (qualification) |
 | `tests/test_suite.py` | Unit/integration/failure tests | NFR-010, 7 |
 | `tests/test_drivers_mocked.py` | Spinnaker/OpenCV driver logic via fake SDKs | NFR-009, NFR-005 |
 | `tests/test_properties.py` | Property-based frame-buffer invariants (Hypothesis) | NFR-010 |
+| `tests/test_acceptance.py` | Acceptance check-matrix tests (pure + simulator) | NFR-010 |
 | `config/camera.json` | Example BlackFly config | FR-001 |
 | `config/bfs_u3_16s2c.json` | BFS-U3-16S2C-CS color config (BayerRG8 → BGR8) | FR-001 |
 | `pyproject.toml` | Package metadata + optional-dependency extras | — |
@@ -333,6 +336,53 @@ fail to rebind. The driver logs a WARN at connect when no serial is set.
 | Reconnect doesn't recover (NFR-005) | selecting by `device_index` | set `serial` in config or pass `--serial` |
 | Image never focuses | C lens on CS body | add 5 mm C-to-CS adapter |
 | Pink / green tint | wrong Bayer handling | confirm `device_pixel_format: BayerRG8` in config |
+
+## Automated acceptance testing (rig qualification)
+
+`hardware_acceptance.py` is the machine-vision **bring-up qualification** tool:
+it streams from a real camera for a fixed window, evaluates a matrix of
+objective PASS/FAIL checks, prints a report, and **exits non-zero on any
+failure** (so it drops straight into CI / a go-no-go gate).
+
+```bash
+python hardware_acceptance.py --serial 21512345                 # 20s, NFR defaults
+python hardware_acceptance.py --serial 21512345 --seconds 30 --min-fps 60
+python hardware_acceptance.py --serial 21512345 --cycles 10     # + teardown-churn test
+python hardware_acceptance.py --mono --no-hw-timestamp          # mono / no device clock
+```
+
+**Checks (PASS/FAIL):** streaming reached · frames received · resolution
+(NFR-003) · pixel format & dtype · sustained throughput (NFR-001, with a small
+finite-window tolerance) · frame integrity / malformed rate (NFR-006) ·
+hardware-timestamp presence + monotonicity · inter-frame jitter · dropped-frame
+rate (from device timestamps) · image sanity (not black / not saturated) ·
+stream stability (no reconnects during the run). With `--cycles N` it also runs
+N connect→stream→teardown cycles to validate clean release (the `gc.collect`/
+`atexit` teardown path) — the automated counterpart to a manual unplug/replug.
+
+**Informational only (not pass/fail):** sharpness (a focus proxy: variance of
+the Laplacian) and per-channel means (a colour-tint proxy). These are
+scene-dependent and can't be graded without a reference target — eyeball them
+with `run_hardware.py`.
+
+All thresholds are flags (`--min-fps`, `--max-jitter-ms`, `--max-dropped-rate`,
+`--min-mean`, `--max-saturated`, …) so you can tune the gate to your rig.
+
+The check logic itself is unit-tested without hardware (`tests/test_acceptance.py`):
+`evaluate()` is a pure function of collected metrics, so every PASS/FAIL/SKIP
+path is verified deterministically, and the full collect→evaluate path plus the
+cycle test run against the simulator.
+
+### Recommended rig validation sequence
+```bash
+# 1. plumbing go/no-go (must say "Ran 1 test", not skipped):
+python tests/test_suite.py TestSpinnakerHardware -v
+# 2. objective acceptance gate (exit 0 = pass):
+python hardware_acceptance.py --serial <SERIAL> --seconds 30 --cycles 10
+# 3. image quality (focus / exposure / true colour) — eyeball:
+python run_hardware.py --serial <SERIAL>
+# 4. reconnect (NFR-005) — unplug/replug the USB during step 2 or 3.
+```
 
 ## Requirements traceability (SRS v0.2 §7)
 

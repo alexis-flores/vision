@@ -449,6 +449,19 @@ class TestScriptsImport(unittest.TestCase):
         ns = run_hardware._parse_args(["--headless", "--seconds", "1"])
         self.assertTrue(ns.headless)
         self.assertTrue(ns.config.endswith(".json"))
+        ns2 = run_hardware._parse_args(["--serial", "21512345"])
+        self.assertEqual(ns2.serial, "21512345")
+
+    def test_hardware_acceptance_imports(self):
+        import hardware_acceptance
+        ns = hardware_acceptance._parse_args(
+            ["--serial", "21512345", "--seconds", "5", "--min-fps", "60",
+             "--mono", "--no-hw-timestamp"])
+        crit = hardware_acceptance._criteria(ns)
+        self.assertEqual(ns.serial, "21512345")
+        self.assertFalse(crit.require_color)        # --mono
+        self.assertFalse(crit.require_hw_timestamp)  # --no-hw-timestamp
+        self.assertEqual(crit.min_fps, 60.0)
 
 
 # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵

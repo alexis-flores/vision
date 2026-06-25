@@ -51,7 +51,10 @@ class CameraService:
     READ_TIMEOUT_S = 1.0 # per-iteration blocking read budget
     ERROR_RETRY_DELAY_S = 0.25 # backoff after driver error in worker
     RECONNECT_DELAY_S = 0.5 # wait between reconnect attempts (NFR-005)
-    MAX_RECONNECT_ATTEMPTS = 5 # 0 == retry forever; >0 bounds the attempts
+    # ~60 x 0.5s = a ~30s window, enough time for a human to replug a hot-removed
+    # camera (and to ride out a USB re-enumeration); reconnects within ~0.5s once
+    # the device is back. 0 == retry forever; >0 bounds the attempts.
+    MAX_RECONNECT_ATTEMPTS = 60
 
     def __init__(self) -> None:
         self._cams: Dict[str, _CameraEntry] = {}

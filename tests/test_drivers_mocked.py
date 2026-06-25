@@ -136,10 +136,12 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             self.UserSetDefault = Enum()
             self.UserSetLoad = Command()
             self.inited = self.acquiring = False
+            self.deinit_calls = self.endacq_calls = 0
         def Init(self): self.inited = True
-        def DeInit(self): self.inited = False
+        def DeInit(self): self.inited = False; self.deinit_calls += 1
         def BeginAcquisition(self): self.acquiring = True
-        def EndAcquisition(self): self.acquiring = False
+        def EndAcquisition(self):
+            self.acquiring = False; self.endacq_calls += 1
         def GetTLStreamNodeMap(self): return StreamNodeMap()
         def GetNextImage(self, timeout):
             if getnext_errorcode is not None:
@@ -249,6 +251,31 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         with self.assertRaises(CameraError) as ctx:
             drv.read_frame(timeout=0.5)
         self.assertNotIsInstance(ctx.exception, CameraTimeoutError)
+        self.assertTrue(drv._lost)               # flagged as device-lost
+
+    def test_lost_device_teardown_skips_native_cleanup(self):
+        # Hot-unplug: a backend fault marks the device lost; disconnect() must
+        # NOT call EndAcquisition/DeInit on the dead handle (those SIGSEGV in the
+        # real SDK). It should still release the System and not raise.
+        fake, drv = self._install(getnext_errorcode=-1012)   # stream aborted
+        drv.connect(); drv.start_stream()
+        with self.assertRaises(CameraError):
+            drv.read_frame(timeout=0.5)
+        before = fake._released["count"]
+        drv.disconnect()                          # must not raise / segfault
+        self.assertEqual(fake._cam.endacq_calls, 0)   # skipped EndAcquisition
+        self.assertEqual(fake._cam.deinit_calls, 0)   # skipped DeInit
+        self.assertEqual(fake._released["count"], before + 1)  # System released
+        self.assertEqual(drv.get_status(), CameraStatus.DISCONNECTED)
+        self.assertFalse(drv._lost)               # flag cleared for next connect
+
+    def test_clean_teardown_does_call_native_cleanup(self):
+        # Normal (not lost) disconnect must still do the full ordered teardown.
+        fake, drv = self._install()
+        drv.connect(); drv.start_stream()
+        drv.disconnect()
+        self.assertEqual(fake._cam.endacq_calls, 1)
+        self.assertEqual(fake._cam.deinit_calls, 1)
 
     def test_incomplete_frame_is_malformed(self):
         fake, drv = self._install(incomplete=True)

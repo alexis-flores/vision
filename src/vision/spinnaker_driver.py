@@ -44,6 +44,7 @@ class SpinnakerCameraDriver(CameraDriver):
         self._cam: Any = None # PySpin.CameraPtr
         self._pyspin: Any = None # module handle
         self._processor: Any = None # PySpin.ImageProcessor (host debayer/convert)
+        self._lost = False # device removed/aborted mid-stream (hot-unplug)
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Lifecycle
@@ -84,6 +85,7 @@ class SpinnakerCameraDriver(CameraDriver):
 
             self._cam.Init()
             self._init_processor()
+            self._lost = False  # fresh handle from re-enumeration; clear the flag
             # Mark CONNECTED before applying config: set_config()/_require_connected
             # require it, and the camera handle is already valid after Init().
             self._set_status(CameraStatus.CONNECTED)
@@ -100,13 +102,26 @@ class SpinnakerCameraDriver(CameraDriver):
             raise
 
     def disconnect(self) -> None:
+        # If the device was lost mid-stream (hot-unplug), its transport is dead:
+        # EndAcquisition()/DeInit() on the removed handle crash the SDK natively
+        # (uncatchable SIGSEGV). Skip them and just drop our references; releasing
+        # the System (after gc) reclaims everything safely. Otherwise do the full
+        # ordered teardown.
+        lost = self._lost
         if self.get_status() == CameraStatus.STREAMING:
-            self.stop_stream()
+            if lost:
+                self._set_status(CameraStatus.CONNECTED)  # abandon the dead stream
+            else:
+                try:
+                    self.stop_stream()
+                except CameraError as e:  # cleanup must never raise
+                    log.debug("stop_stream during disconnect: %s", e)
         if self._cam is not None:
-            try:
-                self._cam.DeInit()
-            except Exception as e:  # cleanup must never raise
-                log.debug("DeInit during disconnect: %s", e)
+            if not lost:
+                try:
+                    self._cam.DeInit()
+                except Exception as e:  # cleanup must never raise
+                    log.debug("DeInit during disconnect: %s", e)
             del self._cam
             self._cam = None
         self._processor = None
@@ -125,6 +140,7 @@ class SpinnakerCameraDriver(CameraDriver):
             self._system = None
         # Clean teardown done; the atexit safety net is no longer needed.
         atexit.unregister(self._release_on_exit)
+        self._lost = False
         self._set_status(CameraStatus.DISCONNECTED)
 
     def _release_on_exit(self) -> None:
@@ -197,6 +213,12 @@ class SpinnakerCameraDriver(CameraDriver):
             if getattr(e, "errorcode", None) == timeout_code:
                 raise CameraTimeoutError(
                     f"No frame within {timeout}s: {e}") from e
+            # Non-timeout GetNextImage failure means the stream was aborted /
+            # the device was removed (e.g. hot-unplug, ERR -1012). The handle's
+            # transport is now dead: flag it so teardown SKIPS EndAcquisition /
+            # DeInit, which would otherwise dereference the removed device and
+            # SIGSEGV inside the SDK (a native crash Python cannot catch).
+            self._lost = True
             raise CameraError(f"GetNextImage failed: {e}") from e
 
         try:

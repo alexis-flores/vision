@@ -111,11 +111,14 @@ def _build_service(args: argparse.Namespace):
     return svc, cfg.name
 
 
-def _run_gui(gui_fifo: FIFOFrameBuffer, title: str) -> None:
+def _run_gui(gui_fifo: FIFOFrameBuffer, title: str, svc: CameraService,
+             cam: str) -> None:
     from PyQt6.QtWidgets import QApplication  # imported only when GUI is used
     from gui_bridge import CameraViewer
     app = QApplication(sys.argv)
-    win = CameraViewer(gui_fifo, title=title)
+    win = CameraViewer(gui_fifo, title=title,
+                       health_fn=lambda: svc.get_health(cam),
+                       stats_fn=lambda: svc.stats(cam))
     win.show()
     log.info("Close the window to stop.")
     app.exec()
@@ -179,7 +182,7 @@ def main(argv=None) -> int:
         if args.headless:
             _run_headless(args, svc, cam, cueing)
         else:
-            _run_gui(gui_fifo, f"{cam} ({args.backend})")
+            _run_gui(gui_fifo, f"{cam} ({args.backend})", svc, cam)
     finally:
         svc.stop_streaming(cam)
         if cueing is not None:

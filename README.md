@@ -149,6 +149,7 @@ python app.py --backend spinnaker --serial 215  # real BlackFly S + viewer
 python app.py --backend opencv --device 0       # webcam + viewer
 python app.py --headless --seconds 10           # any backend, no GUI + stats
 python app.py --headless --inject-faults        # sim NFR-005/006 demo
+python app.py --no-cueing                       # display-only: frames -> GUI, no cueing
 ```
 | Flag | Default | Description |
 |---|---|---|
@@ -159,6 +160,12 @@ python app.py --headless --inject-faults        # sim NFR-005/006 demo
 | `--headless` | off | no GUI; stream and log stats for `--seconds` |
 | `--seconds N` | `10.0` | headless run duration (seconds) |
 | `--inject-faults` | off | sim only: inject malformed frames + a crash to demo NFR-006/NFR-005 |
+| `--no-cueing` | off | don't start the cueing consumer; serve frames to the GUI only (display-only acquisition) |
+
+The cueing consumer and the GUI are **independent fan-out branches**, so
+`--no-cueing` gives you a pure live-view (`service → FIFO → CameraViewer`) with no
+cueing thread. (`--no-cueing --headless` attaches no consumer at all — frames are
+just acquired and dropped, useful only as a bare stream test.)
 
 > The PyQt viewer needs the `gui` extra (`pip install -e ".[gui]"`); a real
 > camera needs PySpin + the device. `gui_bridge.py` is imported by `app.py` for

@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 import time
+from typing import Optional
 
 from vision.camera_service import CameraService
 from vision.camera_types import CameraConfig, CameraFeature
@@ -61,6 +62,9 @@ def _parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--inject-faults", action="store_true",
                     help="sim only: inject malformed frames + a backend crash "
                          "to demo NFR-006 skip and NFR-005 reconnect")
+    ap.add_argument("--no-cueing", action="store_true",
+                    help="don't start the cueing consumer; only serve frames to "
+                         "the GUI (FIFO) — display-only acquisition")
     return ap.parse_args(argv)
 
 
@@ -118,7 +122,7 @@ def _run_gui(gui_fifo: FIFOFrameBuffer, title: str) -> None:
 
 
 def _run_headless(args: argparse.Namespace, svc: CameraService, cam: str,
-                  cueing: CueingSystem) -> None:
+                  cueing: Optional[CueingSystem]) -> None:
     log.info("Headless run for %.1fs (Ctrl-C to stop early).", args.seconds)
     inject = args.inject_faults and args.backend == "sim"
     t_end = time.monotonic() + args.seconds
@@ -127,11 +131,11 @@ def _run_headless(args: argparse.Namespace, svc: CameraService, cam: str,
         while time.monotonic() < t_end:
             time.sleep(1.0)
             st = svc.stats(cam)
-            log.info("delivered=%d malformed=%d reconnects=%d | "
-                     "cueing consumed=%d errored=%d",
+            cue = (f"{cueing.frames_consumed} consumed, {cueing.frames_errored} "
+                   f"errored" if cueing is not None else "off")
+            log.info("delivered=%d malformed=%d reconnects=%d | cueing %s",
                      st["frames_delivered"], st["malformed_frames"],
-                     st["reconnects"], cueing.frames_consumed,
-                     cueing.frames_errored)
+                     st["reconnects"], cue)
             if inject and not injected:
                 injected = True
                 log.info(">>> Injecting 3 malformed frames (NFR-006)")
@@ -150,17 +154,26 @@ def main(argv=None) -> int:
                     args.backend)
 
     svc, cam = _build_service(args)
-    cueing_ring = CircularFrameBuffer(capacity=64)   # service -> cueing
     gui_fifo = FIFOFrameBuffer(capacity=4)           # service -> GUI
-    svc.attach_sink(cam, cueing_ring)
+
+    # Cueing and the GUI are independent fan-out branches; either can be omitted.
+    cueing = None
+    if not args.no_cueing:
+        cueing_ring = CircularFrameBuffer(capacity=64)   # service -> cueing
+        svc.attach_sink(cam, cueing_ring)
+        cueing = CueingSystem(cueing_ring)               # ingests frames; pipeline TBD
     if not args.headless:
-        svc.attach_sink(cam, gui_fifo)
-    cueing = CueingSystem(cueing_ring)               # ingests frames; pipeline TBD
+        svc.attach_sink(cam, gui_fifo)                   # service -> GUI
+    if args.no_cueing and args.headless:
+        log.warning("--no-cueing with --headless: no consumer attached; "
+                    "frames will just be acquired and dropped.")
 
     svc.connect(cam)
-    cueing.start()
+    if cueing is not None:
+        cueing.start()
     svc.start_streaming(cam)
-    log.info("Streaming %r on backend=%s", cam, args.backend)
+    log.info("Streaming %r on backend=%s (cueing=%s)", cam, args.backend,
+             "off" if cueing is None else "on")
 
     try:
         if args.headless:
@@ -169,13 +182,15 @@ def main(argv=None) -> int:
             _run_gui(gui_fifo, f"{cam} ({args.backend})")
     finally:
         svc.stop_streaming(cam)
-        cueing.stop()
+        if cueing is not None:
+            cueing.stop()
         svc.shutdown()
         st = svc.stats(cam)
+        consumed = "off" if cueing is None else cueing.frames_consumed
         log.info("Final: status=%s delivered=%d malformed=%d reconnects=%d | "
-                 "cueing consumed=%d", svc.get_status(cam).name,
+                 "cueing consumed=%s", svc.get_status(cam).name,
                  st["frames_delivered"], st["malformed_frames"],
-                 st["reconnects"], cueing.frames_consumed)
+                 st["reconnects"], consumed)
     return 0
 
 

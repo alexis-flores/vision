@@ -467,6 +467,8 @@ class TestScriptsImport(unittest.TestCase):
         ns2 = app._parse_args(["--backend", "spinnaker", "--serial", "21512345"])
         self.assertEqual(ns2.backend, "spinnaker")
         self.assertEqual(ns2.serial, "21512345")
+        self.assertFalse(ns.no_cueing)                         # default: cueing on
+        self.assertTrue(app._parse_args(["--no-cueing"]).no_cueing)
 
     def test_hardware_acceptance_imports(self):
         import hardware_acceptance

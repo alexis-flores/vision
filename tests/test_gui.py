@@ -68,12 +68,14 @@ class TestCameraViewer(unittest.TestCase):
             health_fn=lambda: health, stats_fn=lambda: stats)
         self._run(win, ms=200)
         self.assertGreaterEqual(win._frames_shown, 1)
-        msg = win.statusBar().currentMessage()
-        self.assertIn("cam", msg)          # camera name
-        self.assertIn("160x120", msg)      # resolution
-        self.assertIn("fps", msg)          # display FPS
-        self.assertIn("°C", msg)           # device temperature
-        win.close()
+        hud = win._hud.text()              # the on-image OSD
+        self.assertIn("cam", hud)          # camera name
+        self.assertIn("160", hud)          # resolution w
+        self.assertIn("120", hud)          # resolution h
+        self.assertIn("GUI", hud)          # display FPS, labeled
+        self.assertIn("CAM", hud)          # camera FPS, labeled
+        self.assertIn("41.5", hud)         # device temperature
+        self.assertIn("frame 1", win.statusBar().currentMessage())
 
     def test_works_without_callbacks_and_mono(self):
         fifo = FIFOFrameBuffer(4)
@@ -81,10 +83,11 @@ class TestCameraViewer(unittest.TestCase):
         win = gui_bridge.CameraViewer(fifo, title="m", poll_ms=10)
         self._run(win, ms=150)
         self.assertGreaterEqual(win._frames_shown, 1)
-        msg = win.statusBar().currentMessage()
-        self.assertIn("frame=7", msg)
-        self.assertNotIn("°C", msg)        # no health_fn -> no temperature
-        win.close()
+        hud = win._hud.text()
+        self.assertIn("GUI", hud)          # display FPS still shown
+        self.assertNotIn("CAM", hud)       # no stats_fn -> no camera FPS
+        self.assertNotIn("&deg;C", hud)    # no health_fn -> no temperature
+        self.assertIn("frame 7", win.statusBar().currentMessage())
 
 
 if __name__ == "__main__":

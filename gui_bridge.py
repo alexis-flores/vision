@@ -62,14 +62,18 @@ def frame_to_qimage(frame: CameraFrame) -> QImage:
 
 class CameraViewer(QMainWindow):
     """
-    Demand-driven live-view window. A QTimer polls the FIFO at GUI_POLL_MS and
-    repaints the freshest frame with its **aspect ratio preserved**; the
-    producer never blocks on the GUI.
+    Demand-driven live-view window styled like an industry live feed: a dark
+    letterboxed video area, a translucent corner **HUD** (camera, resolution,
+    FPS, temperature), and a bottom detail strip. A QTimer polls the FIFO at
+    GUI_POLL_MS and repaints the freshest frame with its aspect ratio preserved;
+    the producer never blocks on the GUI.
 
-    If `health_fn` / `stats_fn` are supplied, the status bar also shows live
-    telemetry — display + camera FPS, device temperature, dropped/malformed
-    frames, reconnects — refreshed at ~2 Hz so the per-frame path stays cheap.
+    With `health_fn` / `stats_fn` it shows live telemetry (display + camera FPS,
+    device temperature, dropped/malformed/lost frames, reconnects), refreshed at
+    ~2 Hz so the per-frame path stays cheap.
     """
+
+    HUD_MARGIN = 12
 
     def __init__(self, fifo: FIFOFrameBuffer, title: str = "Camera",
                  poll_ms: int = GUI_POLL_MS,
@@ -81,27 +85,48 @@ class CameraViewer(QMainWindow):
         self._health_fn = health_fn
         self._stats_fn = stats_fn
 
-        # FPS / telemetry state
+        # FPS / telemetry state (cached; refreshed ~2 Hz)
         self._frames_shown = 0
         self._anchor_t = time.monotonic()
         self._anchor_shown = 0
         self._disp_fps = 0.0
         self._cam_fps = 0.0
         self._prev_delivered: Optional[int] = None
-        self._telemetry = ""
+        self._temp: Optional[float] = None
+        self._malformed = 0
+        self._reconnects = 0
+        self._lost: Optional[int] = None
         self._last_refresh = 0.0
 
-        self._label = QLabel("Waiting for frames...")
+        # Video area — centered, aspect-preserved, on a dark (#101010) backdrop
+        # so the letterbox bars look intentional (an ID selector avoids styling
+        # the child HUD).
+        self._label = QLabel("Waiting for frames…")
         self._label.setMinimumSize(320, 240)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setSizePolicy(QSizePolicy.Policy.Expanding,
                                   QSizePolicy.Policy.Expanding)
         central = QWidget()
+        central.setObjectName("videoArea")
+        central.setStyleSheet("#videoArea { background-color: #101010; }")
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
         self.setCentralWidget(central)
-        self.setStatusBar(QStatusBar())
-        self.resize(960, 720)            # sensible 4:3 default
+
+        # On-image HUD overlay (top-left OSD) — the headline live metrics.
+        self._hud = QLabel(self._label)
+        self._hud.setTextFormat(Qt.TextFormat.RichText)
+        self._hud.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._hud.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 160); color: #EAEAEA;"
+            " padding: 6px 10px; border-radius: 6px; font-size: 12px;"
+            " font-family: 'Menlo','Consolas','DejaVu Sans Mono',monospace; }")
+        self._hud.move(self.HUD_MARGIN, self.HUD_MARGIN)
+        self._hud.hide()
+
+        self.setStatusBar(QStatusBar())   # bottom: per-frame + bookkeeping detail
+        self.resize(960, 720)             # sensible 4:3 default
 
         # The timer IS the "ready for next frame" signal (SRS 5.4).
         self._timer = QTimer(self)
@@ -130,7 +155,8 @@ class CameraViewer(QMainWindow):
         now = time.monotonic()
         if now - self._last_refresh >= STATS_REFRESH_S:
             self._refresh_telemetry(now)
-        self._show_status(frame)
+        self._update_hud(frame)
+        self._update_status(frame)
 
     def _refresh_telemetry(self, now: float) -> None:
         st = self._safe_call(self._stats_fn)
@@ -145,25 +171,40 @@ class CameraViewer(QMainWindow):
                 self._prev_delivered = delivered
             self._anchor_t = now
             self._anchor_shown = self._frames_shown
-        self._telemetry = self._build_telemetry(st, health)
+        self._malformed = st.get("malformed_frames", self._malformed)
+        self._reconnects = st.get("reconnects", self._reconnects)
+        self._temp = health.get("temperature_c", self._temp)
+        if "StreamLostFrameCount" in health:
+            self._lost = health["StreamLostFrameCount"]
         self._last_refresh = now
 
-    def _build_telemetry(self, st: dict, health: dict) -> str:
-        parts = []
+    def _update_hud(self, frame: CameraFrame) -> None:
+        h, w = frame.data.shape[0], frame.data.shape[1]
+        cam = f"&nbsp;&middot;&nbsp; CAM {self._cam_fps:.0f}" if self._stats_fn else ""
+        temp = ""
+        if self._temp is not None:
+            color = ("#7CCB7C" if self._temp < 60 else
+                     "#E6B53C" if self._temp < 75 else "#E05A5A")
+            temp = (f'<br><span style="color:{color}">&#9679; '
+                    f'{self._temp:.1f} &deg;C</span>')
+        self._hud.setText(
+            f'<b>{frame.camera_name or "camera"}</b>'
+            f'<span style="color:#9AA0A6">&nbsp;&nbsp;{w}&times;{h}</span>'
+            f'<br>GUI {self._disp_fps:.0f}{cam} fps{temp}')
+        self._hud.adjustSize()
+        self._hud.show()
+        self._hud.raise_()
+
+    def _update_status(self, frame: CameraFrame) -> None:
+        detail = [f"frame {frame.frame_id}", f"age {frame.age * 1000:.0f} ms",
+                  f"shown {self._frames_shown}",
+                  f"gui-dropped {self._fifo.dropped}"]
         if self._stats_fn is not None:
-            parts.append(f"cam {self._cam_fps:.1f} fps")
-            if st.get("malformed_frames"):
-                parts.append(f"malformed={st['malformed_frames']}")
-            if st.get("reconnects"):
-                parts.append(f"reconnects={st['reconnects']}")
-        if self._health_fn is not None:
-            temp = health.get("temperature_c")
-            if temp is not None:
-                parts.append(f"{temp:.1f}°C")
-            lost = health.get("StreamLostFrameCount")
-            if lost:
-                parts.append(f"lost={lost}")
-        return "  ".join(parts)
+            detail += [f"malformed {self._malformed}",
+                       f"reconnects {self._reconnects}"]
+        if self._lost is not None:
+            detail.append(f"lost {self._lost}")
+        self.statusBar().showMessage("    ·    ".join(detail))
 
     @staticmethod
     def _safe_call(fn: Optional[Callable[[], dict]]) -> dict:
@@ -173,15 +214,6 @@ class CameraViewer(QMainWindow):
             return fn() or {}
         except Exception:   # telemetry must never break the live view
             return {}
-
-    def _show_status(self, frame: CameraFrame) -> None:
-        h, w = frame.data.shape[0], frame.data.shape[1]
-        parts = [frame.camera_name or "camera", f"{w}x{h}",
-                 f"frame={frame.frame_id}", f"{self._disp_fps:.1f} fps",
-                 f"age={frame.age * 1000:.1f} ms", f"shown={self._frames_shown}"]
-        if self._telemetry:
-            parts.append(self._telemetry)
-        self.statusBar().showMessage("   ".join(parts))
 
     def closeEvent(self, event) -> None:
         self._timer.stop()

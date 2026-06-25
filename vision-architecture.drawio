@@ -23,7 +23,7 @@
           <mxGeometry height="230" width="1100" x="40" y="650" as="geometry" />
         </mxCell>
         <mxCell id="bandEntry" parent="1" style="rounded=1;arcSize=2;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=10;spacingTop=6;fontStyle=1;fontSize=13;opacity=70;" value="Entry points &amp; packaging" vertex="1">
-          <mxGeometry height="810" width="290" x="1180" y="70" as="geometry" />
+          <mxGeometry height="570" width="290" x="1180" y="70" as="geometry" />
         </mxCell>
         <mxCell id="cfgfiles" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="config/*.json&#xa;camera.json · bfs_u3_16s2c.json&#xa;serial · resolution · fps · exposure" vertex="1">
           <mxGeometry height="68" width="220" x="70" y="108" as="geometry" />
@@ -67,20 +67,17 @@
         <mxCell id="down" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="Cueing pipeline + downstream consumer — OUT OF SCOPE (SRS v0.2, no cueing spec yet):  centroid extraction · object tracking · state estimation · acquisition · pixel→angular cue.   Plug into CueingSystem.frame_processor." vertex="1">
           <mxGeometry height="56" width="660" x="350" y="800" as="geometry" />
         </mxCell>
-        <mxCell id="emain" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="main.py&#xa;simulated end-to-end demo&#xa;+ NFR-005/006 fault injection" vertex="1">
-          <mxGeometry height="66" width="255" x="1200" y="120" as="geometry" />
-        </mxCell>
-        <mxCell id="erun" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="run_hardware.py&#xa;real BlackFly S pipeline&#xa;+ live PyQt viewer" vertex="1">
-          <mxGeometry height="66" width="255" x="1200" y="300" as="geometry" />
+        <mxCell id="eapp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;strokeWidth=2;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="app.py — single runner&#xa;--backend sim / opencv / spinnaker&#xa;GUI or --headless; --inject-faults (sim)&#xa;wires service + cueing + gui_bridge" vertex="1">
+          <mxGeometry height="86" width="255" x="1200" y="120" as="geometry" />
         </mxCell>
         <mxCell id="eaccept" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="hardware_acceptance.py&#xa;acceptance/qualification (exit 0/1)&#xa;objective PASS/FAIL battery + report" vertex="1">
-          <mxGeometry height="66" width="255" x="1200" y="400" as="geometry" />
+          <mxGeometry height="66" width="255" x="1200" y="240" as="geometry" />
         </mxCell>
         <mxCell id="etests" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="tests/&#xa;unittest + hypothesis&#xa;test_suite · drivers_mocked · properties · acceptance&#xa;TestSpinnakerHardware (HW-001) skips w/o camera" vertex="1">
-          <mxGeometry height="86" width="255" x="1200" y="510" as="geometry" />
+          <mxGeometry height="86" width="255" x="1200" y="350" as="geometry" />
         </mxCell>
         <mxCell id="epkg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;align=left;spacingLeft=6;verticalAlign=top;spacingTop=4;" value="pyproject.toml&#xa;src/ package &#39;vision&#39; v2.0.0&#xa;pip install -e &quot;.[all]&quot;&#xa;requirements.txt" vertex="1">
-          <mxGeometry height="86" width="255" x="1200" y="720" as="geometry" />
+          <mxGeometry height="86" width="255" x="1200" y="480" as="geometry" />
         </mxCell>
         <mxCell id="e1" edge="1" parent="1" source="cfgfiles" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#333333;fontSize=10;" target="cfgloader">
           <mxGeometry relative="1" as="geometry" />
@@ -147,8 +144,8 @@
         <mxCell id="e19" edge="1" parent="1" source="cueing" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#666666;fontSize=10;" target="down" value="frames → pipeline">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="entrynote" parent="1" style="text;html=1;align=left;fontSize=10;fontStyle=2;fontColor=#666666;" value="(each entry point wires &amp; runs the pipeline at left)" vertex="1">
-          <mxGeometry height="30" width="255" x="1200" y="830" as="geometry" />
+        <mxCell id="entrynote" parent="1" style="text;html=1;align=left;fontSize=10;fontStyle=2;fontColor=#666666;" value="(app.py wires &amp; runs the pipeline at left)" vertex="1">
+          <mxGeometry height="30" width="255" x="1200" y="600" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

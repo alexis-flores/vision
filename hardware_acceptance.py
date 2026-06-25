@@ -2,7 +2,7 @@
 hardware_acceptance.py
 Run the automated camera acceptance battery on a real BlackFly S (Spinnaker)
 and exit non-zero on any failure — the machine-vision bring-up qualification
-counterpart to run_hardware.py.
+counterpart to app.py.
 
 It streams for a fixed window and evaluates objective PASS/FAIL checks
 (resolution, throughput, frame integrity, hardware-timestamp monotonicity,

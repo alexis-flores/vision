@@ -1,5 +1,5 @@
 # Core runtime dependencies for the vision system (camera backend + frame
-# serving). These are sufficient to run main.py and the test suite.
+# serving). These are sufficient to run app.py and the test suite.
 #
 # Optional extras (GUI, YAML configs, real hardware) are declared in
 # pyproject.toml under [project.optional-dependencies]. Install them with:

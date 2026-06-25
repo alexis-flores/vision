@@ -44,7 +44,7 @@ all = ["vision-system[gui,yaml,dev]"]
 # Install it from the vendor SDK package separately.
 
 # src layout: the importable library lives in src/vision/. The entry-point
-# scripts (main.py, gui_bridge.py, run_hardware.py) stay at the repo root and
+# scripts (app.py, gui_bridge.py, hardware_acceptance.py) stay at the repo root and
 # import the installed `vision` package; they are not packaged themselves.
 [tool.setuptools.packages.find]
 where = ["src"]

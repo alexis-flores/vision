@@ -25,7 +25,7 @@ import unittest
 import numpy as np
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)  # root scripts (run_hardware)
+sys.path.insert(0, _ROOT)  # root scripts (app.py)
 sys.path.insert(0, os.path.join(_ROOT, "src"))  # the `vision` package (src layout)
 
 from vision.camera_driver import (CameraError, FeatureNotSupportedError,
@@ -458,13 +458,14 @@ class TestRegressions(unittest.TestCase):
 # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
 
 class TestScriptsImport(unittest.TestCase):
-    def test_run_hardware_imports(self):
-        import run_hardware
-        # arg parsing works without a camera; defaults to the BFS config.
-        ns = run_hardware._parse_args(["--headless", "--seconds", "1"])
+    def test_app_imports(self):
+        import app
+        # arg parsing works without a camera or any backend SDK.
+        ns = app._parse_args(["--headless", "--seconds", "1"])
         self.assertTrue(ns.headless)
-        self.assertTrue(ns.config.endswith(".json"))
-        ns2 = run_hardware._parse_args(["--serial", "21512345"])
+        self.assertEqual(ns.backend, "sim")          # default backend
+        ns2 = app._parse_args(["--backend", "spinnaker", "--serial", "21512345"])
+        self.assertEqual(ns2.backend, "spinnaker")
         self.assertEqual(ns2.serial, "21512345")
 
     def test_hardware_acceptance_imports(self):

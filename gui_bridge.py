@@ -14,18 +14,21 @@ from a FIFOFrameBuffer the camera service pushes into:
 
     service -> FIFOFrameBuffer -> CameraViewer
 
+This module is the reusable **viewer component** (driver-agnostic): it displays
+whatever frames the service fans into its FIFO, for any backend. To actually run
+a camera through it, use `app.py` (it wires a backend + this viewer). Adding a
+new camera backend needs no change here.
+
 Requires: pip install PyQt6   (swap imports to PyQt5 if needed)
 """
 
 from __future__ import annotations
 
-import sys
-
 import numpy as np
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtWidgets import (QApplication, QLabel, QMainWindow, QStatusBar,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QLabel, QMainWindow, QStatusBar, QVBoxLayout,
+                             QWidget)
 
 from vision.camera_types import CameraFrame
 from vision.frame_buffers import FIFOFrameBuffer
@@ -95,48 +98,3 @@ class CameraViewer(QMainWindow):
     def closeEvent(self, event) -> None:
         self._timer.stop()
         super().closeEvent(event)
-
-
-# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
-#   Standalone demo: simulated camera -> service -> live viewer (+ cueing)
-# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
-
-if __name__ == "__main__":
-    import logging
-
-    from vision.camera_service import CameraService
-    from vision.camera_types import CameraConfig, CameraFeature
-    from vision.cueing_system import CueingSystem
-    from vision.frame_buffers import CircularFrameBuffer
-    from vision.generic_driver import GenericCameraDriver
-
-    logging.basicConfig(level=logging.INFO)
-
-    cfg = CameraConfig(
-        name="sim0", model="SimCam", max_resolution=(640, 480),
-        max_fps=60.0, fps=60.0,
-        features=CameraFeature.FRAME_RATE | CameraFeature.RESOLUTION)
-
-    svc = CameraService()
-    svc.add_camera("sim0", GenericCameraDriver(cfg, n_spots=6))
-
-    cueing_ring = CircularFrameBuffer(capacity=32)  # service -> cueing
-    gui_fifo = FIFOFrameBuffer(capacity=2)          # service -> GUI
-    svc.attach_sink("sim0", cueing_ring)
-    svc.attach_sink("sim0", gui_fifo)
-
-    cueing = CueingSystem(cueing_ring)  # consumes frames; pipeline out of scope
-
-    svc.connect("sim0")
-    cueing.start()
-    svc.start_streaming("sim0")
-
-    app = QApplication(sys.argv)
-    win = CameraViewer(gui_fifo, title="sim0 - live")
-    win.show()
-    rc = app.exec()
-
-    svc.stop_streaming("sim0")
-    cueing.stop()
-    svc.shutdown()
-    sys.exit(rc)

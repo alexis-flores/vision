@@ -6,7 +6,7 @@ things you've already written, and reach a runnable program as early as
 possible** — then enrich it layer by layer.
 
 You're rebuilding the package `vision` (in `src/vision/`) plus the root scripts
-(`main.py`, `gui_bridge.py`, `run_hardware.py`) and `tests/`.
+(`app.py`, `gui_bridge.py`, `hardware_acceptance.py`) and `tests/`.
 
 > **Scope note (SRS v0.2).** The vision system *serves frames*; it does not
 > extract centroids or run image processing — that moved to the downstream
@@ -29,6 +29,7 @@ camera_types ──┬─> camera_driver ──┬─> generic_driver
                │                   ├─> camera_service  (also uses config_loader)
                │                   └─> cueing_system
                └─> gui_bridge (CameraViewer, also uses frame_buffers)
+app.py  (single runner: picks a driver backend, wires service + cueing + gui_bridge)
 lens  (standalone — depends on nothing)
 ```
 
@@ -192,27 +193,30 @@ and don't invent a data schema for it.
 **Concepts:** producer/consumer decoupling via a buffer; skip-and-continue on
 processor errors (NFR-006); clean thread shutdown.
 
-### 8. `main.py` (root script)
-**Why now:** wire everything with the simulator and **see the whole SRS v0.2
-dataflow run headless**, including the injected malformed frames and backend
-crash. The service fans frames out to a `CircularFrameBuffer` (→ cueing) and a
-`FIFOFrameBuffer` (→ GUI).
+### 8. `app.py` (root script — the single runner)
+**Why now:** wire everything together and **see the whole SRS v0.2 dataflow
+run**. The service fans frames out to a `CircularFrameBuffer` (→ cueing) and a
+`FIFOFrameBuffer` (→ GUI). `app.py` picks the backend at runtime
+(`--backend {sim,opencv,spinnaker}`), runs GUI or `--headless`, and (sim only)
+`--inject-faults` injects malformed frames + a backend crash to demo NFR-006/005.
+PySpin is imported only when `--backend spinnaker` is chosen, so it runs with no
+SDK installed.
 
-**Checkpoint (the big one):** `python main.py` → watch the run summary:
-frames delivered, cueing consumed, reconnects, drops. You've now built the
-entire core pipeline.
+**Checkpoint (the big one):** `python app.py --headless --inject-faults` → watch
+the run summary: frames delivered, cueing consumed, malformed skipped,
+reconnects. You've now built the entire core pipeline.
 
 ---
 
 ## Phase 6 — Visualization
 
-### 9. `gui_bridge.py` (root script)
+### 9. `gui_bridge.py` (viewer module)
 **Why now:** a PyQt6 `CameraViewer` that polls a `FIFOFrameBuffer` every 33 ms
 and repaints — the demand-driven, never-blocks GUI (FR-004, NFR-008, SRS 5.4).
-The service pushes raw frames straight into the FIFO sink.
+It's a driver-agnostic **module** (not run directly); `app.py` wires a backend
+into it. Adding a new camera backend needs no change here.
 
-**Checkpoint:** `python gui_bridge.py` → a live window showing the simulated
-camera feed.
+**Checkpoint:** `python app.py` → a live window showing the simulated camera feed.
 
 ---
 
@@ -221,16 +225,15 @@ camera feed.
 ### 10. `opencv_driver.py`
 **Why now:** your first *real* camera (any webcam) — a gentle hardware step. A
 capture thread feeds a latest-frame slot; `read_frame` waits on a condition with
-a timeout (OpenCV has no native blocking-with-timeout).
+a timeout (OpenCV has no native blocking-with-timeout). Run it with
+`python app.py --backend opencv`.
 
 ### 11. `spinnaker_driver.py`
 **Why now:** the BlackFly S backend (PySpin). Lazy-imports PySpin so the rest of
 the package runs without the SDK. Note the color path (BayerRG8 → BGR8 via
-`ImageProcessor`), `AcquisitionMode=Continuous`, and `NewestOnly` buffering.
-
-### 12. `run_hardware.py` (root script)
-**Why now:** the production entry point — same pipeline as `main.py` but with
-`SpinnakerCameraDriver` and the live viewer, no fault injection.
+`ImageProcessor`), `AcquisitionMode=Continuous`, and `NewestOnly` buffering. Run
+it with `python app.py --backend spinnaker --serial <S>`. Each new backend is
+just another branch in `app.py`'s driver factory — no new entry-point script.
 
 ---
 
@@ -274,6 +277,6 @@ Optional-dependency extras (`gui`, `yaml`, `dev`, `all`), and confirm
   `frame_processor` hook means the (future) processing pipeline is swappable
   without touching the vision system.
 
-Build the simulator early, keep `main.py` runnable, and add a test per module —
+Build the simulator early, keep `app.py` runnable, and add a test per module —
 that's the fastest path from "typed it out" to "I understand why it's shaped
 this way."

@@ -47,7 +47,7 @@ entry-point scripts, config, and tests sit at the repo root.
 src/vision/        # the `vision` package (importable library)
     __init__.py    # public API re-exports
     camera_*.py  *_driver.py  cueing_system.py  frame_buffers.py  lens.py  ...
-main.py  gui_bridge.py  run_hardware.py   # entry-point scripts (not packaged)
+app.py  gui_bridge.py  hardware_acceptance.py   # entry-point scripts (not packaged)
 config/            # camera JSON configs
 tests/             # test suite
 pyproject.toml  requirements.txt  README.md
@@ -74,9 +74,8 @@ After `pip install -e .` the library is importable as, e.g.,
 | `cueing_system.py` | Downstream **frame consumer** stand-in (pluggable processor hook) | 5.1 dataflow |
 | `acceptance.py` | Automated acceptance battery (objective PASS/FAIL checks + report) | 7 (qualification) |
 | `lens.py` | Lens/FOV calculators (FLIR app-note: angular + linear FOV) | NFR-004 |
-| `gui_bridge.py` | PyQt viewer, 33 ms demand-driven poll | FR-004, NFR-011, 5.4 |
-| `main.py` | Headless end-to-end demo on the simulator (incl. NFR-005/006 fault injection) | — |
-| `run_hardware.py` | Full pipeline on a real BlackFly S (Spinnaker) + PyQt viewer | — |
+| `gui_bridge.py` | PyQt viewer **module** (`CameraViewer`), driver-agnostic; reused by `app.py` | FR-004, NFR-011, 5.4 |
+| `app.py` | Single runner — any backend (sim/opencv/spinnaker), GUI or headless | — |
 | `hardware_acceptance.py` | Acceptance/qualification CLI for a real camera (exit 0/1) | 7 (qualification) |
 | `tests/test_suite.py` | Unit/integration/failure tests | NFR-010, 7 |
 | `tests/test_drivers_mocked.py` | Spinnaker/OpenCV driver logic via fake SDKs | NFR-009, NFR-005 |
@@ -111,15 +110,15 @@ driving real BlackFly hardware.
 Run it:
 
 ```bash
-python main.py                               # headless full-pipeline demo
+python app.py                                # simulator + live PyQt viewer (needs [gui])
+python app.py --headless                     # simulator, no GUI
 python -m unittest discover -s tests         # run the test suite
-python gui_bridge.py                          # live PyQt viewer (needs [gui])
 ```
 
 | Extra | Installs | Enables |
 |---|---|---|
 | `all`   | gui + yaml + dev | everything pip-installable, one command |
-| `gui`   | PyQt6  | `gui_bridge.py` live viewer (FR-004) |
+| `gui`   | PyQt6  | `app.py` live viewer / `CameraViewer` (FR-004) |
 | `yaml`  | PyYAML | YAML camera configs in addition to JSON |
 | `dev`   | pytest, hypothesis, coverage, ruff, mypy | running the test suite + QA |
 
@@ -127,43 +126,43 @@ python gui_bridge.py                          # live PyQt viewer (needs [gui])
 `spinnaker_driver.py` is not on PyPI — install it from the vendor SDK package.
 The rest of the stack runs without it via the simulated `GenericCameraDriver`.
 
-`main.py` runs the simulated camera through the entire SRS dataflow and
-deliberately injects malformed frames (NFR-006) and a backend crash (NFR-005)
-so you can watch the skip-and-continue and auto-reconnect behavior in the logs.
+`python app.py --headless --inject-faults` runs the simulated camera through the
+entire SRS dataflow and deliberately injects malformed frames (NFR-006) and a
+backend crash (NFR-005) so you can watch the skip-and-continue and auto-reconnect
+behavior in the logs.
 
 ## Commands reference — runnable files & tests
 
 All commands assume the package is installed (`pip install -e ".[all]"`) and, for
-a new shell, the venv is active. The four root scripts each have a `__main__`;
-run them with `python <script>.py`.
+a new shell, the venv is active. There are two runnable scripts — `app.py` (the
+runner) and `hardware_acceptance.py` (the qualifier); `gui_bridge.py` is the
+viewer **module** they reuse, not run directly.
 
-### Runnable scripts
+### `app.py` — the single runner (any backend, GUI or headless)
 
-**`main.py`** — headless end-to-end demo on the **simulator** (no camera, no
-flags). Streams → cueing + GUI fan-out, injects a malformed-frame burst and a
-backend crash to show NFR-006 skip and NFR-005 reconnect, prints a run summary.
+Runs the **simulator**, an **OpenCV/UVC** camera, or a **BlackFly S** (Spinnaker)
+through the full pipeline (service → cueing + GUI). PySpin is imported only when
+`--backend spinnaker` is chosen, so the script works with no SDK installed.
 ```bash
-python main.py
-```
-
-**`gui_bridge.py`** — live **PyQt6 viewer** on the simulator (no flags). Needs
-the `gui` extra.
-```bash
-python gui_bridge.py            # requires: pip install -e ".[gui]"
-```
-
-**`run_hardware.py`** — full pipeline on a **real BlackFly S** (Spinnaker) with a
-live viewer or headless stats. Needs PySpin + a camera (and `gui` for the viewer).
-```bash
-python run_hardware.py --serial 21512345
-python run_hardware.py --serial 21512345 --headless --seconds 30
+python app.py                                   # simulator + live viewer (default)
+python app.py --backend spinnaker --serial 215  # real BlackFly S + viewer
+python app.py --backend opencv --device 0       # webcam + viewer
+python app.py --headless --seconds 10           # any backend, no GUI + stats
+python app.py --headless --inject-faults        # sim NFR-005/006 demo
 ```
 | Flag | Default | Description |
 |---|---|---|
-| `--config PATH` | `config/bfs_u3_16s2c.json` | camera config JSON |
-| `--serial S` | from config | bind to a specific camera serial (recommended for NFR-005 reconnect) |
+| `--backend {sim,opencv,spinnaker}` | `sim` | which camera driver to run |
+| `--config PATH` | built-in (BFS config for spinnaker) | camera config JSON |
+| `--serial S` | from config | spinnaker: bind to a specific camera serial (recommended for NFR-005) |
+| `--device N` | `0` | opencv: capture device index |
 | `--headless` | off | no GUI; stream and log stats for `--seconds` |
 | `--seconds N` | `10.0` | headless run duration (seconds) |
+| `--inject-faults` | off | sim only: inject malformed frames + a crash to demo NFR-006/NFR-005 |
+
+> The PyQt viewer needs the `gui` extra (`pip install -e ".[gui]"`); a real
+> camera needs PySpin + the device. `gui_bridge.py` is imported by `app.py` for
+> the viewer and is not meant to be run on its own.
 
 **`hardware_acceptance.py`** — automated **acceptance/qualification** on a real
 camera; prints a PASS/FAIL report and **exits 0 (pass) / 1 (fail)**. Needs PySpin
@@ -292,13 +291,12 @@ svc.add_cameras_from_config("config/bfs_u3_16s2c.json",
                             lambda cfg: SpinnakerCameraDriver(cfg))
 ```
 
-`run_hardware.py` wires that driver through the whole pipeline (vision serves
-frames → cueing consumer + PyQt viewer) — the hardware counterpart of `main.py`:
+`app.py --backend spinnaker` wires that driver through the whole pipeline (vision
+serves frames → cueing consumer + PyQt viewer):
 
 ```bash
-python run_hardware.py                            # live viewer
-python run_hardware.py --headless --seconds 10    # no GUI, logs stats
-python run_hardware.py --serial 21512345          # bind to a specific unit (recommended)
+python app.py --backend spinnaker --serial 21512345                   # live viewer
+python app.py --backend spinnaker --serial 21512345 --headless --seconds 10
 ```
 
 > **Reconnect (NFR-005) needs a serial.** Bind the camera by **serial** — set
@@ -407,10 +405,10 @@ hardware timestamp. If this passes, the driver works with your camera.
 
 ```bash
 pip install -e ".[gui]"
-python run_hardware.py
+python app.py --backend spinnaker --serial <SERIAL>
 ```
 
-A window titled `bfs16s2c - live` opens with the live ~30 FPS feed:
+A window titled `bfs16s2c (spinnaker)` opens with the live ~30 FPS feed:
 natural-color (debayered BGR) video, with a status bar reading
 `bfs16s2c  frame=…  age=… ms  shown=…`. The terminal logs `Streaming 'bfs16s2c'`
 and `Close the window to stop.`
@@ -473,7 +471,7 @@ gaps, then skipping if neither is available). **Device health telemetry**
 **Informational only (not pass/fail):** sharpness (a focus proxy: variance of
 the Laplacian) and per-channel means (a colour-tint proxy). These are
 scene-dependent and can't be graded without a reference target — eyeball them
-with `run_hardware.py`.
+with `app.py --backend spinnaker`.
 
 All thresholds are flags (`--min-fps`, `--max-jitter-ms`, `--max-dropped-rate`,
 `--min-mean`, `--max-saturated`, …) so you can tune the gate to your rig.
@@ -490,7 +488,7 @@ python tests/test_suite.py TestSpinnakerHardware -v
 # 2. objective acceptance gate (exit 0 = pass):
 python hardware_acceptance.py --serial <SERIAL> --seconds 30 --cycles 10
 # 3. image quality (focus / exposure / true colour) — eyeball:
-python run_hardware.py --serial <SERIAL>
+python app.py --backend spinnaker --serial <SERIAL>
 # 4. reconnect (NFR-005) — unplug/replug the USB during step 2 or 3.
 ```
 
@@ -530,7 +528,7 @@ behaviors and the vision→cueing frame handoff — all asserted on every run.
 | I — Driver base-class types | Abstract `CameraDriver` API + shared data types | `camera_types.py`, `camera_driver.py` |
 | II — Driver requirements | NFR-005/006/001/003/009, FR-001 on the driver | `TestGenericDriver`, `tests/test_drivers_mocked.py` |
 | III — Service-layer requirements | NFR-005/006/001/003/007, FR-001/004 on the service | `TestCameraService`, `TestCueingEndToEnd` |
-| IV — GUI testbench + handoff | NFR-011, FR-004 real-time visualization + frame handoff | `gui_bridge.py` + `run_hardware.py` (manual), `TestCueingEndToEnd` |
+| IV — GUI testbench + handoff | NFR-011, FR-004 real-time visualization + frame handoff | `gui_bridge.py` + `app.py` (manual), `TestCueingEndToEnd` |
 
 ## Logging (SRS 5.5)
 Standard `logging` with INFO (init/connect/frame receipts), WARN (dropped or

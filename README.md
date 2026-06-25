@@ -131,6 +131,106 @@ The rest of the stack runs without it via the simulated `GenericCameraDriver`.
 deliberately injects malformed frames (NFR-006) and a backend crash (NFR-005)
 so you can watch the skip-and-continue and auto-reconnect behavior in the logs.
 
+## Commands reference — runnable files & tests
+
+All commands assume the package is installed (`pip install -e ".[all]"`) and, for
+a new shell, the venv is active. The four root scripts each have a `__main__`;
+run them with `python <script>.py`.
+
+### Runnable scripts
+
+**`main.py`** — headless end-to-end demo on the **simulator** (no camera, no
+flags). Streams → cueing + GUI fan-out, injects a malformed-frame burst and a
+backend crash to show NFR-006 skip and NFR-005 reconnect, prints a run summary.
+```bash
+python main.py
+```
+
+**`gui_bridge.py`** — live **PyQt6 viewer** on the simulator (no flags). Needs
+the `gui` extra.
+```bash
+python gui_bridge.py            # requires: pip install -e ".[gui]"
+```
+
+**`run_hardware.py`** — full pipeline on a **real BlackFly S** (Spinnaker) with a
+live viewer or headless stats. Needs PySpin + a camera (and `gui` for the viewer).
+```bash
+python run_hardware.py --serial 21512345
+python run_hardware.py --serial 21512345 --headless --seconds 30
+```
+| Flag | Default | Description |
+|---|---|---|
+| `--config PATH` | `config/bfs_u3_16s2c.json` | camera config JSON |
+| `--serial S` | from config | bind to a specific camera serial (recommended for NFR-005 reconnect) |
+| `--headless` | off | no GUI; stream and log stats for `--seconds` |
+| `--seconds N` | `10.0` | headless run duration (seconds) |
+
+**`hardware_acceptance.py`** — automated **acceptance/qualification** on a real
+camera; prints a PASS/FAIL report and **exits 0 (pass) / 1 (fail)**. Needs PySpin
++ a camera.
+```bash
+python hardware_acceptance.py --serial 21512345
+python hardware_acceptance.py --serial 21512345 --seconds 30 --cycles 10
+python hardware_acceptance.py --mono --no-hw-timestamp        # mono / no device clock
+```
+| Flag | Default | Description |
+|---|---|---|
+| `--config PATH` | `config/bfs_u3_16s2c.json` | camera config JSON |
+| `--serial S` | from config | bind to a specific camera serial |
+| `--seconds N` | `20.0` | acquisition window |
+| `--min-fps F` | `60.0` | min sustained FPS, NFR-001 (small finite-window tolerance applied) |
+| `--min-resolution N` | `512` | min width/height in px, NFR-003 |
+| `--mono` | off | expect a single-channel (mono) frame instead of color |
+| `--no-hw-timestamp` | off | do not require a device hardware timestamp |
+| `--max-incomplete-rate R` | `0.01` | max malformed/incomplete frame fraction, NFR-006 |
+| `--max-dropped-rate R` | `0.005` | max dropped-frame fraction (device counter / timestamp gaps) |
+| `--max-jitter-ms M` | `2.0` | max inter-frame interval stddev (ms) |
+| `--min-mean V` | `2.0` | min mean pixel level (not black) |
+| `--max-saturated R` | `0.10` | max saturated-pixel fraction (not blown out) |
+| `--max-temperature C` | `75.0` | device temperature ceiling (°C) |
+| `--cycles N` | `0` | also run N connect/stream/teardown cycles (0 = skip) |
+| `--frames-per-cycle N` | `5` | frames read per cycle (with `--cycles`) |
+
+### Tests
+
+Pure stdlib `unittest` (no dependency); `pytest` also works after `pip install -e
+".[dev]"`. `tests/test_properties.py` needs Hypothesis (`[dev]`) and skips
+cleanly without it; `TestSpinnakerHardware` skips unless PySpin + a camera are
+present.
+
+```bash
+python -m unittest discover -s tests             # run everything
+python -m unittest discover -s tests -v          # verbose
+
+# one file:
+python -m unittest tests.test_acceptance
+# one class / one method:
+python -m unittest tests.test_suite.TestCameraService
+python -m unittest tests.test_suite.TestCameraService.test_malformed_skip
+
+# run the real-hardware smoke test on the rig (must say "Ran 1 test", not skipped):
+python tests/test_suite.py TestSpinnakerHardware -v
+
+# pytest equivalents (needs [dev]):
+pytest                                            # all
+pytest tests/test_suite.py::TestCameraService::test_malformed_skip
+```
+
+| Test file | What it covers | Needs |
+|---|---|---|
+| `tests/test_suite.py` | config, driver lifecycle, frame buffers, service (reconnect/skip), cueing handoff, lens math, script imports, HW-001 smoke | core |
+| `tests/test_drivers_mocked.py` | Spinnaker/OpenCV driver logic via fake SDKs (chunk data, temperature, serial selection, teardown) | core |
+| `tests/test_properties.py` | property-based frame-buffer invariants | `[dev]` (Hypothesis) |
+| `tests/test_acceptance.py` | acceptance check matrix (pure) + simulator + connect cycles | core |
+
+### Coverage & static checks (with `[dev]`)
+```bash
+coverage run --source=src/vision -m unittest discover -s tests && coverage report
+ruff check .          # lint
+mypy                  # type-check (config in pyproject.toml)
+bandit -r src         # security scan   (pip install bandit)
+```
+
 ## The cueing handoff (vision → cueing)
 
 The vision system writes each frame into a `CircularFrameBuffer`; the cueing

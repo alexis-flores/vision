@@ -41,6 +41,19 @@ from vision.lens import (angular_fov_deg, focal_length_mm, linear_fov_mm,
                   sensor_dims_mm, working_distance_mm)
 
 
+def _wait_until(predicate, timeout=5.0, interval=0.01):
+    """Poll until predicate() is true (or timeout), returning its final value.
+    Replaces fixed sleeps so threaded tests don't false-fail under CPU load:
+    the generous timeout absorbs slow scheduling, while a genuine failure still
+    surfaces (the test's own assert runs afterward)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
+
+
 def basic_config(name="cam", **kw):
     defaults = dict(
         name=name, model="sim", max_resolution=(512, 512), max_fps=60.0,
@@ -254,7 +267,7 @@ class TestCameraService(unittest.TestCase):
         self.svc.attach_sink("svccam", fifo)
         self.svc.connect("svccam")
         self.svc.start_streaming("svccam")
-        time.sleep(0.4)
+        _wait_until(lambda: self.svc.stats("svccam")["frames_delivered"] > 0)
         self.svc.stop_streaming("svccam")
         self.assertGreater(self.svc.stats("svccam")["frames_delivered"], 0)
         self.assertIsNotNone(ring.pop(timeout=0.2))
@@ -264,9 +277,10 @@ class TestCameraService(unittest.TestCase):
         self.svc.attach_sink("svccam", ring)
         self.svc.connect("svccam")
         self.svc.start_streaming("svccam")
-        time.sleep(0.1)
+        _wait_until(lambda: self.svc.stats("svccam")["frames_delivered"] > 0)
         self.drv.inject_malformed(3)
-        time.sleep(0.3)
+        # Poll until the worker has skipped all 3 (no fixed sleep -> no flake).
+        _wait_until(lambda: self.svc.stats("svccam")["malformed_frames"] >= 3)
         self.svc.stop_streaming("svccam")
         st = self.svc.stats("svccam")
         self.assertGreaterEqual(st["malformed_frames"], 3)
@@ -302,7 +316,7 @@ class TestCameraService(unittest.TestCase):
     def test_stop_streaming_idempotent_quiet(self):  # cosmetic double-log fix
         self.svc.connect("svccam")
         self.svc.start_streaming("svccam")
-        time.sleep(0.1)
+        _wait_until(lambda: self.svc.stats("svccam")["frames_delivered"] > 0)
         with self.assertLogs("vision.camera_service", level="INFO") as cm:
             self.svc.stop_streaming("svccam")   # real stop -> logs once
             self.svc.stop_streaming("svccam")   # no-op -> must NOT log again
@@ -331,7 +345,7 @@ class TestCueingEndToEnd(unittest.TestCase):  # IT-002
 
         svc.connect("e2e")
         cueing.start(); svc.start_streaming("e2e")
-        time.sleep(0.6)
+        _wait_until(lambda: cueing.frames_consumed > 0 and len(seen) > 0)
         svc.stop_streaming("e2e"); cueing.stop(); svc.shutdown()
 
         self.assertGreater(svc.stats("e2e")["frames_delivered"], 0)
@@ -353,7 +367,8 @@ class TestCueingEndToEnd(unittest.TestCase):  # IT-002
         ring.push(CameraFrame(data=np.zeros((4, 4), np.uint8),
                               timestamp=time.monotonic(), frame_id=1))
         cueing.start()
-        time.sleep(0.2)
+        _wait_until(lambda: cueing.frames_consumed >= 1
+                    and cueing.frames_errored >= 1)
         cueing.stop()
         self.assertGreaterEqual(cueing.frames_consumed, 1)
         self.assertGreaterEqual(cueing.frames_errored, 1)

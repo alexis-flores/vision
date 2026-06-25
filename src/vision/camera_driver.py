@@ -103,6 +103,12 @@ class CameraDriver(abc.ABC):
     #           Shared concrete helpers
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
 
+    def get_health(self) -> dict:
+        """Best-effort device health telemetry (e.g. temperature, transport
+        counters) as a flat dict of name -> value. Default: no telemetry.
+        Backends that can read device registers override this."""
+        return {}
+
     def get_status(self) -> CameraStatus:
         with self._lock:
             return self._status

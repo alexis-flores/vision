@@ -30,7 +30,7 @@ from vision.generic_driver import GenericCameraDriver
 
 
 def healthy_metrics(n=120, fps=60.0, w=640, h=640, color=True, hw=True,
-                    level=100):
+                    level=100, device_ids=False, temps=None):
     period = 1.0 / fps
     base = 1000.0
     hw0 = 1_000_000_000
@@ -39,13 +39,14 @@ def healthy_metrics(n=120, fps=60.0, w=640, h=640, color=True, hw=True,
             host_ts=base + i * period,
             hw_ts=(hw0 + int(i * period * 1e9)) if hw else None,
             frame_id=i, ndim=3 if color else 2, channels=3 if color else 1,
-            dtype="uint8")
+            dtype="uint8", device_frame_id=(i if device_ids else None))
         for i in range(n)]
     shape = (h, w, 3) if color else (h, w)
     samples = [np.full(shape, level, np.uint8) for _ in range(4)]
     return Metrics(frames=frames, samples=samples, delivered=n, malformed=0,
                    reconnects=0, streaming_reached=True, cfg_resolution=(w, h),
-                   cfg_fps=fps, duration_s=n * period)
+                   cfg_fps=fps, duration_s=n * period,
+                   temperatures=list(temps or []))
 
 
 def _check(report, name):
@@ -132,6 +133,33 @@ class TestEvaluatePure(unittest.TestCase):
         m.reconnects = 2
         rep = evaluate(m, self.crit)
         self.assertFalse(_check(rep, "stream_stability").passed)
+
+    def test_device_counter_no_gap_passes(self):  # chunk-based drop detection
+        rep = evaluate(healthy_metrics(device_ids=True), self.crit)
+        drop = _check(rep, "dropped_frames")
+        self.assertTrue(drop.passed)
+        self.assertIn("device frame counter", drop.detail)  # authoritative path
+
+    def test_device_counter_gap_fails(self):
+        m = healthy_metrics(device_ids=True)
+        for i in range(50, len(m.frames)):
+            m.frames[i].device_frame_id += 5   # 5 missing device ids -> drops
+        rep = evaluate(m, self.crit)
+        self.assertFalse(_check(rep, "dropped_frames").passed)
+
+    def test_temperature_over_limit_fails(self):
+        m = healthy_metrics(temps=[40.0, 78.0, 50.0])
+        rep = evaluate(m, AcceptanceCriteria(max_temperature_c=75.0))
+        self.assertFalse(_check(rep, "temperature").passed)
+
+    def test_temperature_within_limit_passes(self):
+        m = healthy_metrics(temps=[40.0, 55.0])
+        rep = evaluate(m, AcceptanceCriteria(max_temperature_c=75.0))
+        self.assertTrue(_check(rep, "temperature").passed)
+
+    def test_temperature_absent_skips(self):
+        rep = evaluate(healthy_metrics(), self.crit)  # no temps
+        self.assertTrue(_check(rep, "temperature").skipped)
 
 
 class TestAcceptanceIntegration(unittest.TestCase):

@@ -186,6 +186,7 @@ class SpinnakerCameraDriver(CameraDriver):
             # BGR8; for mono it is an inexpensive passthrough/copy.
             data = self._convert(img) # returns an owned copy
             hw_ts = img.GetTimeStamp() # ns, device clock
+            device_fid = self._chunk_frame_id(img) # device counter (if chunk on)
         finally:
             img.Release()
 
@@ -195,8 +196,18 @@ class SpinnakerCameraDriver(CameraDriver):
             frame_id=self._next_frame_id(),
             camera_name=self.config.name,
             hw_timestamp_ns=hw_ts,
+            device_frame_id=device_fid,
             pixel_format=self.config.pixel_format,
         )
+
+    def _chunk_frame_id(self, img) -> Optional[int]:
+        """Device frame counter from chunk data, or None if chunk data is off /
+        unsupported. Best-effort: must never break frame delivery."""
+        try:
+            fid = img.GetChunkData().GetFrameID()
+            return int(fid) if fid is not None else None
+        except Exception:  # chunk disabled/unsupported -> no device id
+            return None
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Configuration
@@ -246,6 +257,46 @@ class SpinnakerCameraDriver(CameraDriver):
             log.warning("%s=%s out of range [%s, %s]; clamped to %s",
                         attribute, value, lo, hi, clamped)
         return clamped
+
+    # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+    #   Health telemetry
+    # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+    def get_health(self) -> dict:
+        """Device temperature (°C) plus best-effort transport counters. Safe to
+        call while streaming; reads are guarded so a missing node or transient
+        contention never raises."""
+        if self._cam is None or self._pyspin is None:
+            return {}
+        health: dict = {}
+        temp_node = getattr(self._cam, "DeviceTemperature", None)
+        if temp_node is not None:
+            try:
+                health["temperature_c"] = float(temp_node.GetValue())
+            except self._pyspin.SpinnakerException as e:
+                log.debug("DeviceTemperature read failed: %s", e)
+        # Transport/stream statistics live on the TL stream nodemap; node names
+        # vary by camera/SDK, so read whichever are present.
+        try:
+            snm = self._cam.GetTLStreamNodeMap()
+            for name in ("StreamLostFrameCount", "StreamDroppedFrameCount",
+                         "StreamIncompleteFrameCount", "StreamFailedBufferCount"):
+                val = self._read_int_node(snm, name)
+                if val is not None:
+                    health[name] = val
+        except self._pyspin.SpinnakerException as e:
+            log.debug("Stream statistics read failed: %s", e)
+        return health
+
+    def _read_int_node(self, nodemap, name: str) -> Optional[int]:
+        PySpin = self._pyspin
+        try:
+            node = PySpin.CIntegerPtr(nodemap.GetNode(name))
+            if PySpin.IsAvailable(node) and PySpin.IsReadable(node):
+                return int(node.GetValue())
+        except PySpin.SpinnakerException:
+            return None
+        return None
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Internals
@@ -307,6 +358,30 @@ class SpinnakerCameraDriver(CameraDriver):
         except PySpin.SpinnakerException as e:
             log.warning("Could not set StreamBufferHandlingMode=NewestOnly: %s",
                         e)
+        self._enable_chunk_data()
+
+    def _enable_chunk_data(self) -> None:
+        """Enable GenICam chunk data so each frame carries the device frame
+        counter (and timestamp). A gap in the device frame id is an
+        authoritative dropped-frame signal (vs. inferring drops from timestamp
+        gaps). Best-effort: cameras without chunk support stream normally and
+        device_frame_id stays None."""
+        PySpin = self._pyspin
+        if not hasattr(self._cam, "ChunkModeActive"):
+            return
+        try:
+            self._cam.ChunkModeActive.SetValue(True)
+            for chunk in ("FrameID", "Timestamp"):
+                sel = getattr(PySpin, f"ChunkSelector_{chunk}", None)
+                if sel is None:
+                    continue
+                try:
+                    self._cam.ChunkSelector.SetValue(sel)
+                    self._cam.ChunkEnable.SetValue(True)
+                except PySpin.SpinnakerException as e:
+                    log.debug("Chunk %s not enabled: %s", chunk, e)
+        except PySpin.SpinnakerException as e:
+            log.warning("Could not enable chunk data: %s", e)
 
     def _spin_pixel_format(self, pf: Optional[PixelFormat]):
         """Map our PixelFormat enum to a PySpin PixelFormat_* constant."""

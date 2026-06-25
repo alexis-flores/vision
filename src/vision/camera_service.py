@@ -129,6 +129,11 @@ class CameraService:
     def get_status(self, name: str) -> CameraStatus:
         return self._entry(name).driver.get_status()
 
+    def get_health(self, name: str) -> dict:
+        """Device health telemetry (temperature, transport counters) for a
+        camera. Empty dict if the backend exposes none."""
+        return self._entry(name).driver.get_health()
+
     def camera_names(self) -> List[str]:
         with self._lock:
             return list(self._cams.keys())

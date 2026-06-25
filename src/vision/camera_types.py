@@ -163,9 +163,11 @@ class CameraFrame:
     """
     data: np.ndarray # Image data (H, W) or (H, W, C)
     timestamp: float # Host time, time.monotonic()
-    frame_id: int # Monotonic per-stream counter
+    frame_id: int # Monotonic per-stream counter (host-assigned)
     camera_name: str = ""
     hw_timestamp_ns: Optional[int] = None # Device timestamp if available
+    device_frame_id: Optional[int] = None # Device frame counter (GenICam chunk);
+                                          # gaps == authoritative dropped frames
     pixel_format: Optional[PixelFormat] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 

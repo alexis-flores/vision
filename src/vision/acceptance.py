@@ -59,6 +59,7 @@ class AcceptanceCriteria:
     max_jitter_ms: float = 2.0            # inter-frame interval stddev (device clock)
     min_mean_level: float = 2.0           # not-black floor (0..255)
     max_saturated_frac: float = 0.10      # <=10% pixels at/near full scale
+    max_temperature_c: float = 75.0       # device temperature ceiling (health)
     expect_resolution: Optional[Tuple[int, int]] = None  # (w, h); default: config
     sample_every: int = 10                # keep every Nth frame for image stats
     max_samples: int = 32
@@ -114,6 +115,7 @@ class FrameStat:
     ndim: int
     channels: int
     dtype: str
+    device_frame_id: Optional[int] = None  # GenICam chunk frame counter
 
 
 @dataclass
@@ -128,6 +130,8 @@ class Metrics:
     cfg_resolution: Tuple[int, int] = (0, 0)
     cfg_fps: float = 0.0
     duration_s: float = 0.0
+    temperatures: List[float] = field(default_factory=list)  # sampled during run
+    health: dict = field(default_factory=dict)               # final health snapshot
 
 
 class _Collector:
@@ -146,7 +150,8 @@ class _Collector:
         ch = d.shape[2] if d.ndim == 3 else 1
         self.frames.append(FrameStat(
             host_ts=frame.timestamp, hw_ts=frame.hw_timestamp_ns,
-            frame_id=frame.frame_id, ndim=d.ndim, channels=ch, dtype=str(d.dtype)))
+            frame_id=frame.frame_id, ndim=d.ndim, channels=ch,
+            dtype=str(d.dtype), device_frame_id=frame.device_frame_id))
         if (self._n % self._sample_every == 0
                 and len(self.samples) < self._max_samples):
             self.samples.append(np.array(d, copy=True))
@@ -163,8 +168,16 @@ def collect(service: CameraService, name: str,
     t0 = time.monotonic()
     service.start_streaming(name)
     streaming = service.get_status(name) == CameraStatus.STREAMING
+    temps: List[float] = []
+    health: dict = {}
     try:
-        time.sleep(criteria.seconds)  # interruptible by Ctrl-C; finally stops cleanly
+        end = t0 + criteria.seconds
+        while time.monotonic() < end:
+            time.sleep(min(1.0, max(0.0, end - time.monotonic())))  # ~1 Hz health poll
+            health = service.get_health(name)
+            t = health.get("temperature_c")
+            if t is not None:
+                temps.append(float(t))
     finally:
         service.stop_streaming(name)
         service.detach_sink(name, collector)
@@ -176,7 +189,7 @@ def collect(service: CameraService, name: str,
         delivered=stats["frames_delivered"], malformed=stats["malformed_frames"],
         reconnects=stats["reconnects"], streaming_reached=streaming,
         cfg_resolution=(res[0], res[1]), cfg_fps=float(cfg.fps or 0.0),
-        duration_s=duration)
+        duration_s=duration, temperatures=temps, health=health)
 
 
 # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
@@ -283,6 +296,7 @@ def evaluate(m: Metrics, criteria: AcceptanceCriteria) -> AcceptanceReport:
 
     # 6. Hardware timestamp present + monotonic
     hw = [f.hw_ts for f in m.frames if f.hw_ts is not None]
+    dids = [f.device_frame_id for f in m.frames if f.device_frame_id is not None]
     if not criteria.require_hw_timestamp and not hw:
         add(CheckResult("hw_timestamp", True, "not required / not present",
                         skipped=True))
@@ -292,8 +306,8 @@ def evaluate(m: Metrics, criteria: AcceptanceCriteria) -> AcceptanceReport:
         add(CheckResult("hw_timestamp", present and monotonic,
                         f"present={len(hw)}/{n} monotonic={monotonic}"))
 
-    # 7. Jitter + dropped frames (device clock if available)
-    _eval_timing(rep, m, criteria, hw, fps)
+    # 7. Jitter (device clock) + dropped frames (device frame counter preferred)
+    _eval_timing(rep, m, criteria, hw, dids)
 
     # 8. Image sanity (not black / not saturated)
     stats = _image_stats(m.samples)
@@ -316,34 +330,69 @@ def evaluate(m: Metrics, criteria: AcceptanceCriteria) -> AcceptanceReport:
     add(CheckResult("stream_stability", m.reconnects == 0,
                     f"{m.reconnects} reconnect(s) during run"))
 
+    # 10. Device temperature (health). Skipped if the backend reports none.
+    if m.temperatures:
+        tmax = max(m.temperatures)
+        add(CheckResult("temperature", tmax <= criteria.max_temperature_c,
+                        f"max {tmax:.1f} C (limit {criteria.max_temperature_c}), "
+                        f"min {min(m.temperatures):.1f}, "
+                        f"mean {sum(m.temperatures) / len(m.temperatures):.1f}"))
+    else:
+        add(CheckResult("temperature", True, "no temperature telemetry",
+                        skipped=True))
+
     rep.info.append(("effective fps", f"{fps:.2f}"))
     rep.info.append(("frames / duration", f"{n} / {m.duration_s:.1f}s"))
+    # Surface any device transport counters (StreamLostFrameCount, etc.) as info.
+    for k, v in m.health.items():
+        if k != "temperature_c":
+            rep.info.append((f"device {k}", str(v)))
     return rep
 
 
 def _eval_timing(rep: AcceptanceReport, m: Metrics, criteria: AcceptanceCriteria,
-                 hw: List[int], fps: float) -> None:
+                 hw: List[int], dids: List[int]) -> None:
+    # Jitter needs device-clock timestamps.
     if len(hw) >= 2:
         deltas = np.diff(np.asarray(hw, dtype=np.float64)) / 1e6  # ns -> ms
-        period_ms = 1000.0 / m.cfg_fps if m.cfg_fps > 0 else float(np.median(deltas))
         jitter_ms = float(deltas.std())
-        dropped = int(sum(max(0, round(d / period_ms) - 1) for d in deltas))
-        drop_rate = dropped / len(deltas)
         rep.checks.append(CheckResult(
             "interframe_jitter", jitter_ms <= criteria.max_jitter_ms,
             f"{jitter_ms:.3f} ms stddev (max {criteria.max_jitter_ms})"))
-        rep.checks.append(CheckResult(
-            "dropped_frames", drop_rate <= criteria.max_dropped_rate,
-            f"{dropped} dropped ({drop_rate * 100:.2f}%, "
-            f"max {criteria.max_dropped_rate * 100:.2f}%)"))
         rep.info.append(("max interframe gap", f"{float(deltas.max()):.3f} ms"))
     else:
         rep.checks.append(CheckResult(
             "interframe_jitter", True,
             "no hardware timestamps — host-clock jitter is informational only",
             skipped=True))
-        rep.checks.append(CheckResult(
-            "dropped_frames", True, "n/a without device timestamps", skipped=True))
+
+    # Dropped frames: the device frame counter (GenICam chunk) is authoritative
+    # — a gap in monotonic device ids is a real drop. Fall back to timestamp-gap
+    # inference, else skip.
+    rate, detail, ok = _drop_rate(m, hw, dids, criteria)
+    rep.checks.append(CheckResult("dropped_frames", ok, detail, skipped=rate is None))
+
+
+def _drop_rate(m: Metrics, hw: List[int], dids: List[int],
+               criteria: AcceptanceCriteria) -> Tuple[Optional[float], str, bool]:
+    """(drop_rate, detail, passed). drop_rate is None when not measurable."""
+    if len(dids) >= 2 and all(b > a for a, b in zip(dids, dids[1:])):
+        expected = (dids[-1] - dids[0]) + 1
+        dropped = max(0, expected - len(dids))
+        rate = dropped / expected if expected else 0.0
+        detail = (f"{dropped} dropped via device frame counter "
+                  f"({rate * 100:.2f}%, max {criteria.max_dropped_rate * 100:.2f}%)")
+        return (rate, detail, rate <= criteria.max_dropped_rate)
+    if len(hw) >= 2:
+        deltas = np.diff(np.asarray(hw, dtype=np.float64)) / 1e6
+        period_ms = (1000.0 / m.cfg_fps if m.cfg_fps > 0
+                     else float(np.median(deltas)))
+        dropped = int(sum(max(0, round(d / period_ms) - 1) for d in deltas))
+        rate = dropped / len(deltas)
+        detail = (f"{dropped} dropped via timestamp gaps "
+                  f"({rate * 100:.2f}%, max {criteria.max_dropped_rate * 100:.2f}%)")
+        return (rate, detail, rate <= criteria.max_dropped_rate)
+    return (None, "n/a (no device counter or timestamps)", True)
 
 
 def _frame_wh(samples: List[np.ndarray],

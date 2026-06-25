@@ -56,6 +56,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--max-jitter-ms", type=float, default=2.0)
     ap.add_argument("--min-mean", type=float, default=2.0)
     ap.add_argument("--max-saturated", type=float, default=0.10)
+    ap.add_argument("--max-temperature", type=float, default=75.0,
+                    help="device temperature ceiling in C (health check)")
     ap.add_argument("--cycles", type=int, default=0,
                     help="also run N connect/stream/teardown cycles (0 = skip)")
     ap.add_argument("--frames-per-cycle", type=int, default=5)
@@ -69,7 +71,8 @@ def _criteria(args: argparse.Namespace) -> AcceptanceCriteria:
         max_incomplete_rate=args.max_incomplete_rate,
         require_hw_timestamp=not args.no_hw_timestamp,
         max_dropped_rate=args.max_dropped_rate, max_jitter_ms=args.max_jitter_ms,
-        min_mean_level=args.min_mean, max_saturated_frac=args.max_saturated)
+        min_mean_level=args.min_mean, max_saturated_frac=args.max_saturated,
+        max_temperature_c=args.max_temperature)
 
 
 def main(argv=None) -> int:

@@ -52,6 +52,8 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
     for nm in ("PixelFormat_BGR8", "PixelFormat_RGB8", "PixelFormat_Mono8",
                "PixelFormat_Mono16", "PixelFormat_BayerRG8"):
         setattr(PySpin, nm, nm)
+    PySpin.ChunkSelector_FrameID = "ChunkSelector_FrameID"
+    PySpin.ChunkSelector_Timestamp = "ChunkSelector_Timestamp"
 
     class Num:
         def __init__(self, v, lo, hi):
@@ -66,12 +68,18 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
         def SetValue(self, x): self.v = x
 
     class Image:
-        def __init__(self, arr, inc=False):
+        def __init__(self, arr, inc=False, frame_id=42):
             self.arr, self.inc, self.released = arr, inc, False
+            self._frame_id = frame_id
         def IsIncomplete(self): return self.inc
         def GetImageStatus(self): return 9
         def GetNDArray(self): return self.arr
         def GetTimeStamp(self): return 123456789
+        def GetChunkData(self):
+            fid = self._frame_id
+            class _CD:
+                def GetFrameID(self): return fid
+            return _CD()
         def Release(self): self.released = True
 
     class ImageProcessor:
@@ -87,8 +95,10 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
     class CEnum:
         def GetEntryByName(self, name): return EnumEntry()
         def SetIntValue(self, v): self.v = v
+        def GetValue(self): return 0           # int-node read (stream stats)
 
     PySpin.CEnumerationPtr = lambda node: node
+    PySpin.CIntegerPtr = lambda node: node
     PySpin.IsAvailable = lambda n: True
     PySpin.IsWritable = lambda n: True
     PySpin.IsReadable = lambda n: True
@@ -112,6 +122,10 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             self.GainAuto = Enum()
             self.AcquisitionFrameRateEnable = Enum()
             self.AcquisitionMode = Enum()
+            self.DeviceTemperature = Num(45.5, 0.0, 100.0)
+            self.ChunkModeActive = Enum()
+            self.ChunkSelector = Enum()
+            self.ChunkEnable = Enum()
             self.inited = self.acquiring = False
         def Init(self): self.inited = True
         def DeInit(self): self.inited = False
@@ -249,6 +263,20 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         drv._release_on_exit()           # simulate atexit firing on unclean exit
         self.assertEqual(drv.get_status(), CameraStatus.DISCONNECTED)
         drv._release_on_exit()           # firing again must never raise
+
+    def test_device_frame_id_from_chunk(self):  # chunk data -> drop detection
+        fake, drv = self._install()
+        drv.connect(); drv.start_stream()
+        frame = drv.read_frame(timeout=1.0)
+        self.assertEqual(frame.device_frame_id, 42)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_get_health_reports_temperature(self):  # device health telemetry
+        fake, drv = self._install()
+        drv.connect()
+        health = drv.get_health()
+        self.assertAlmostEqual(health["temperature_c"], 45.5)
+        drv.disconnect()
 
 
 # --------------------------------------------------------------------------- #

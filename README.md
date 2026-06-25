@@ -354,11 +354,21 @@ python hardware_acceptance.py --mono --no-hw-timestamp          # mono / no devi
 **Checks (PASS/FAIL):** streaming reached · frames received · resolution
 (NFR-003) · pixel format & dtype · sustained throughput (NFR-001, with a small
 finite-window tolerance) · frame integrity / malformed rate (NFR-006) ·
-hardware-timestamp presence + monotonicity · inter-frame jitter · dropped-frame
-rate (from device timestamps) · image sanity (not black / not saturated) ·
-stream stability (no reconnects during the run). With `--cycles N` it also runs
-N connect→stream→teardown cycles to validate clean release (the `gc.collect`/
-`atexit` teardown path) — the automated counterpart to a manual unplug/replug.
+hardware-timestamp presence + monotonicity · inter-frame jitter · **dropped-frame
+rate** · **device temperature** (health) · image sanity (not black / not
+saturated) · stream stability (no reconnects during the run). With `--cycles N`
+it also runs N connect→stream→teardown cycles to validate clean release (the
+`gc.collect`/`atexit` teardown path) — the automated counterpart to a manual
+unplug/replug.
+
+**Authoritative drop detection (GenICam chunk data).** The Spinnaker driver
+enables chunk data so each frame carries the camera's own **device frame
+counter**; a gap in that counter is a *real* dropped frame. The acceptance tool
+uses it when present (falling back to inferring drops from hardware-timestamp
+gaps, then skipping if neither is available). **Device health telemetry**
+(`DeviceTemperature` plus any available transport counters such as
+`StreamLostFrameCount`) is polled ~1 Hz during the run, surfaced in
+`CameraService.get_health()`, gated by `--max-temperature`, and reported.
 
 **Informational only (not pass/fail):** sharpness (a focus proxy: variance of
 the Laplacian) and per-channel means (a colour-tint proxy). These are

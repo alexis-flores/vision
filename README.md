@@ -50,7 +50,7 @@ src/vision/        # the `vision` package (importable library)
 app.py  gui_bridge.py  hardware_acceptance.py   # entry-point scripts (not packaged)
 config/            # camera JSON configs
 tests/             # test suite
-pyproject.toml  requirements.txt  README.md
+pyproject.toml  README.md
 ```
 
 After `pip install -e .` the library is importable as, e.g.,
@@ -83,8 +83,7 @@ After `pip install -e .` the library is importable as, e.g.,
 | `tests/test_acceptance.py` | Acceptance check-matrix tests (pure + simulator) | NFR-010 |
 | `config/camera.json` | Example BlackFly config | FR-001 |
 | `config/bfs_u3_16s2c.json` | BFS-U3-16S2C-CS color config (BayerRG8 → BGR8) | FR-001 |
-| `pyproject.toml` | Package metadata + optional-dependency extras | — |
-| `requirements.txt` | Core runtime dependencies | — |
+| `pyproject.toml` | Package metadata, dependencies + optional-dependency extras | — |
 
 ## Quick start
 
@@ -373,7 +372,7 @@ sudo sh install_spinnaker.sh        # SAY YES to udev rules + flirimaging group
 # then log out / back in so the group membership takes effect
 
 python3.10 -m venv .venv && source .venv/bin/activate   # match the wheel's Python
-pip install -r requirements.txt
+pip install -e .
 pip install spinnaker_python-<ver>-cp310-cp310-linux_x86_64.whl
 ```
 

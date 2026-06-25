@@ -256,8 +256,9 @@ logic via fake PySpin/cv2 (`test_drivers_mocked.py`), frame-buffer invariants
 (`test_properties.py`), the service malformed-skip/reconnect, the vision→cueing
 handoff, the lens math, and the hardware smoke test that skips without a camera.
 
-### 15. Finish `pyproject.toml` / `requirements.txt`
-Optional-dependency extras (`gui`, `yaml`, `dev`, `all`), and confirm
+### 15. Finish `pyproject.toml`
+Dependencies + optional-dependency extras (`gui`, `yaml`, `dev`, `all`) — the
+single source of truth, no separate requirements.txt. Confirm
 `pip install -e ".[all]"` + `python -m unittest discover -s tests` is green.
 
 ---

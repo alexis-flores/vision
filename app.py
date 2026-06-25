@@ -1,4 +1,4 @@
-"""
+r"""
 app.py
 Single entry point for the vision system. Runs any camera backend — the
 simulator, an OpenCV/UVC device, or a BlackFly S via Spinnaker — with a live
@@ -71,6 +71,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--no-cueing", action="store_true",
                     help="don't start the cueing consumer; only serve frames to "
                          "the GUI (FIFO) — display-only acquisition")
+    ap.add_argument("--reset", action="store_true",
+                    help="spinnaker only: load the factory Default user set and "
+                         "make it the power-on default, then exit (resets the "
+                         "camera, including across power-cycles)")
     return ap.parse_args(argv)
 
 
@@ -163,8 +167,29 @@ def _run_headless(args: argparse.Namespace, svc: CameraService, cam: str,
         log.info("Interrupted; shutting down.")
 
 
+def _run_reset(args: argparse.Namespace) -> int:
+    """Connect, load the factory Default user set, and exit (no streaming)."""
+    if args.backend != "spinnaker":
+        log.error("--reset is only supported for --backend spinnaker")
+        return 1
+    svc, cam = _build_service(args)
+    try:
+        svc.connect(cam)            # config is applied then overwritten by reset
+        svc.reset_to_defaults(cam)
+        log.info("Camera %r reset to factory defaults (and set as power-on "
+                 "default — power-cycles will reset too).", cam)
+        return 0
+    except Exception as e:
+        log.error("Reset failed: %s", e)
+        return 1
+    finally:
+        svc.shutdown()
+
+
 def main(argv=None) -> int:
     args = _parse_args(argv)
+    if args.reset:
+        return _run_reset(args)
     if args.inject_faults and args.backend != "sim":
         log.warning("--inject-faults is sim-only; ignoring for backend %r",
                     args.backend)

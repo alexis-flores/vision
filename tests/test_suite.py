@@ -473,6 +473,8 @@ class TestScriptsImport(unittest.TestCase):
         self.assertEqual(ns3.exposure, 12000.0)
         self.assertEqual(ns3.gain, 3.0)
         self.assertEqual(ns3.fps, 30.0)
+        self.assertFalse(ns.reset)                             # default: no reset
+        self.assertTrue(app._parse_args(["--reset"]).reset)
 
     def test_hardware_acceptance_imports(self):
         import hardware_acceptance

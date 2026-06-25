@@ -54,6 +54,8 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
         setattr(PySpin, nm, nm)
     PySpin.ChunkSelector_FrameID = "ChunkSelector_FrameID"
     PySpin.ChunkSelector_Timestamp = "ChunkSelector_Timestamp"
+    PySpin.UserSetSelector_Default = "UserSetSelector_Default"
+    PySpin.UserSetDefault_Default = "UserSetDefault_Default"
 
     class Num:
         def __init__(self, v, lo, hi):
@@ -66,6 +68,10 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
     class Enum:
         def __init__(self): self.v = None
         def SetValue(self, x): self.v = x
+
+    class Command:
+        def __init__(self): self.executed = False
+        def Execute(self): self.executed = True
 
     class Image:
         def __init__(self, arr, inc=False, frame_id=42):
@@ -126,6 +132,9 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             self.ChunkModeActive = Enum()
             self.ChunkSelector = Enum()
             self.ChunkEnable = Enum()
+            self.UserSetSelector = Enum()
+            self.UserSetDefault = Enum()
+            self.UserSetLoad = Command()
             self.inited = self.acquiring = False
         def Init(self): self.inited = True
         def DeInit(self): self.inited = False
@@ -203,6 +212,20 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         self.assertEqual(fake._cam.OffsetY.GetValue(), 0)
         self.assertEqual(fake._cam.Width.GetValue(), 1440)
         self.assertEqual(fake._cam.Height.GetValue(), 1080)
+
+    def test_reset_to_defaults(self):
+        fake, drv = self._install()
+        drv.connect()
+        drv.reset_to_defaults()
+        self.assertTrue(fake._cam.UserSetLoad.executed)                  # loaded
+        self.assertEqual(fake._cam.UserSetSelector.v, "UserSetSelector_Default")
+        self.assertEqual(fake._cam.UserSetDefault.v, "UserSetDefault_Default")
+        drv.disconnect()
+
+    def test_reset_to_defaults_requires_connected(self):
+        fake, drv = self._install()
+        with self.assertRaises(CameraError):           # not connected -> raises
+            drv.reset_to_defaults()
 
     def test_value_clamping(self):
         fake, drv = self._install()

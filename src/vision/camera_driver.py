@@ -109,6 +109,11 @@ class CameraDriver(abc.ABC):
         Backends that can read device registers override this."""
         return {}
 
+    def reset_to_defaults(self) -> None:
+        """Reset the camera to factory defaults (e.g. load the GenICam Default
+        user set). Backends that support it override this; the default raises."""
+        raise CameraError("reset_to_defaults is not supported by this backend")
+
     def get_status(self) -> CameraStatus:
         with self._lock:
             return self._status

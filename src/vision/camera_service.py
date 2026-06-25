@@ -134,6 +134,11 @@ class CameraService:
         camera. Empty dict if the backend exposes none."""
         return self._entry(name).driver.get_health()
 
+    def reset_to_defaults(self, name: str) -> None:
+        """Reset a camera to factory defaults (loads the Default user set).
+        Must be CONNECTED and not streaming. Raises if the backend can't."""
+        self._entry(name).driver.reset_to_defaults()
+
     def camera_names(self) -> List[str]:
         with self._lock:
             return list(self._cams.keys())

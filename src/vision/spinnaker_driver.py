@@ -156,6 +156,28 @@ class SpinnakerCameraDriver(CameraDriver):
         finally:
             self._set_status(CameraStatus.CONNECTED)
 
+    def reset_to_defaults(self) -> None:
+        """Load the factory Default user set into the live registers AND make it
+        the power-on default, so the camera reverts to factory settings and
+        stays reset across power cycles. Requires CONNECTED (not streaming)."""
+        self._require(CameraStatus.CONNECTED, "reset_to_defaults")
+        PySpin = self._pyspin
+        try:
+            self._cam.UserSetSelector.SetValue(PySpin.UserSetSelector_Default)
+            self._cam.UserSetLoad.Execute()
+            log.info("Loaded factory Default user set")
+            # Make Default the power-on set so future power-cycles also reset.
+            const = getattr(PySpin, "UserSetDefault_Default", None)
+            node = getattr(self._cam, "UserSetDefault", None)
+            if node is not None and const is not None:
+                try:
+                    node.SetValue(const)
+                    log.info("Set power-on default user set = Default")
+                except PySpin.SpinnakerException as e:
+                    log.debug("Could not set UserSetDefault: %s", e)
+        except PySpin.SpinnakerException as e:
+            raise CameraError(f"Reset to defaults failed: {e}") from e
+
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Frames
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵

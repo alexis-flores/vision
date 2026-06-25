@@ -89,6 +89,9 @@ class SpinnakerCameraDriver(CameraDriver):
             # Mark CONNECTED before applying config: set_config()/_require_connected
             # require it, and the camera handle is already valid after Init().
             self._set_status(CameraStatus.CONNECTED)
+            # Wait out the brief post-Init window where nodes are not yet writable
+            # (matters on reconnect after a USB re-enumeration); no-op when ready.
+            self._await_ready()
             self._apply_initial_config()
             # Safety net: if the process exits without a clean disconnect()
             # (unhandled exception, Ctrl-C), still DeInit the camera and release
@@ -475,6 +478,25 @@ class SpinnakerCameraDriver(CameraDriver):
             log.warning("Pixel-format conversion failed (%s); using raw frame",
                         e)
             return np.array(img.GetNDArray(), copy=True)
+
+    def _await_ready(self, timeout_s: float = 2.0) -> None:
+        """After Init() — especially on reconnect following a USB re-enumeration
+        — config nodes like Width can be transiently NOT writable (GenICam
+        AccessException, ERR -2006) while the camera firmware settles. Briefly
+        wait for writability so _apply_initial_config() succeeds on the first
+        try instead of failing and forcing extra reconnect attempts. No-op on a
+        healthy camera, where the node is already writable."""
+        PySpin = self._pyspin
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                if PySpin.IsWritable(self._cam.Width):
+                    return
+            except PySpin.SpinnakerException:
+                pass
+            time.sleep(0.05)
+        log.debug("Config nodes still not writable after %.1fs; applying anyway",
+                  timeout_s)
 
     def _apply_initial_config(self) -> None:
         cfg = self.config

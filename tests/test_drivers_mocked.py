@@ -269,6 +269,21 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         self.assertEqual(drv.get_status(), CameraStatus.DISCONNECTED)
         self.assertFalse(drv._lost)               # flag cleared for next connect
 
+    def test_connect_waits_for_writable_nodes(self):
+        # Post-USB-re-enumeration the camera is briefly not-writable (-2006);
+        # connect() must wait for writability, then apply config without raising.
+        fake, drv = self._install()
+        calls = {"n": 0}
+        def flaky_writable(node):
+            calls["n"] += 1
+            return calls["n"] > 3            # not writable for the first polls
+        fake.IsWritable = flaky_writable
+        drv.connect()                        # must not raise; waits then applies
+        self.assertEqual(drv.get_status(), CameraStatus.CONNECTED)
+        self.assertGreater(calls["n"], 3)    # actually polled until writable
+        self.assertEqual(fake._cam.Width.GetValue(), 1440)  # config applied
+        drv.disconnect()
+
     def test_clean_teardown_does_call_native_cleanup(self):
         # Normal (not lost) disconnect must still do the full ordered teardown.
         fake, drv = self._install()

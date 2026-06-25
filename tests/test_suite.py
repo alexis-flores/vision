@@ -299,6 +299,16 @@ class TestCameraService(unittest.TestCase):
             os.path.abspath(path), lambda c: GenericCameraDriver(c))
         self.assertIn("bfly0", names)
 
+    def test_stop_streaming_idempotent_quiet(self):  # cosmetic double-log fix
+        self.svc.connect("svccam")
+        self.svc.start_streaming("svccam")
+        time.sleep(0.1)
+        with self.assertLogs("vision.camera_service", level="INFO") as cm:
+            self.svc.stop_streaming("svccam")   # real stop -> logs once
+            self.svc.stop_streaming("svccam")   # no-op -> must NOT log again
+        stops = [m for m in cm.output if "Streaming stopped" in m]
+        self.assertEqual(len(stops), 1)
+
 
 # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
 #   End-to-end: vision serves frames -> cueing consumes (FR-002/FR-004,

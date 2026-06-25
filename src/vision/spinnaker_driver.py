@@ -7,6 +7,8 @@ package works on machines without the SDK installed.
 
 from __future__ import annotations
 
+import atexit
+import gc
 import logging
 import platform
 import time
@@ -86,6 +88,10 @@ class SpinnakerCameraDriver(CameraDriver):
             # require it, and the camera handle is already valid after Init().
             self._set_status(CameraStatus.CONNECTED)
             self._apply_initial_config()
+            # Safety net: if the process exits without a clean disconnect()
+            # (unhandled exception, Ctrl-C), still DeInit the camera and release
+            # the System singleton so the SDK doesn't crash at interpreter exit.
+            atexit.register(self._release_on_exit)
         except PySpin.SpinnakerException as e:
             self._set_status(CameraStatus.ERROR)
             raise CameraError(f"Spinnaker connect failed: {e}") from e
@@ -104,13 +110,31 @@ class SpinnakerCameraDriver(CameraDriver):
             del self._cam
             self._cam = None
         self._processor = None
+        # Force the native CameraPtr destructor to run BEFORE releasing the
+        # System singleton. CPython refcounting frees it immediately when `del`
+        # drops the last reference, but a lingering/cyclic reference (SWIG
+        # wrappers, cached nodemaps) would otherwise outlive `del` and crash the
+        # SDK when ReleaseInstance() tears down the C++ layer out of order.
+        # disconnect() is a cold path, so the collect cost is irrelevant.
+        gc.collect()
         if self._system is not None:
             try:
                 self._system.ReleaseInstance()
             except Exception as e:  # cleanup must never raise
                 log.debug("ReleaseInstance during disconnect: %s", e)
             self._system = None
+        # Clean teardown done; the atexit safety net is no longer needed.
+        atexit.unregister(self._release_on_exit)
         self._set_status(CameraStatus.DISCONNECTED)
+
+    def _release_on_exit(self) -> None:
+        """atexit safety net for an unclean exit (unhandled exception, Ctrl-C).
+        Runs during interpreter shutdown, so it must never raise — it just
+        attempts the normal ordered teardown."""
+        try:
+            self.disconnect()
+        except Exception as e:  # shutdown cleanup must never raise
+            log.debug("atexit cleanup error: %s", e)
 
     def start_stream(self) -> None:
         self._require(CameraStatus.CONNECTED, "start_stream")

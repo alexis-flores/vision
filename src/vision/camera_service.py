@@ -151,6 +151,14 @@ class CameraService:
 
     def stop_streaming(self, name: str) -> None:
         entry = self._entry(name)
+        # Idempotent: if there's no worker AND the driver isn't streaming, there
+        # is nothing to stop. Return quietly so a redundant call (e.g. an
+        # explicit stop_streaming() followed by shutdown(), which also stops)
+        # doesn't emit a second "Streaming stopped" log. This never skips a real
+        # stop_stream() — the guard requires status != STREAMING.
+        if (entry.worker is None
+                and entry.driver.get_status() != CameraStatus.STREAMING):
+            return
         entry.stop_evt.set()
         if entry.worker is not None:
             entry.worker.join(timeout=3.0)

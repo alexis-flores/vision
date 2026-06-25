@@ -134,11 +134,13 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             PySpin._select.update(mode="index", arg=i); return cam
         def Clear(self): pass
 
+    PySpin._released = {"count": 0}
+
     class System:
         @staticmethod
         def GetInstance(): return System()
         def GetCameras(self): return CamList()
-        def ReleaseInstance(self): pass
+        def ReleaseInstance(self): PySpin._released["count"] += 1
 
     PySpin.System = System
     PySpin._cam = cam
@@ -233,6 +235,20 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         self.assertEqual(fake._select["mode"], "serial")
         self.assertEqual(fake._select["arg"], "BFS123456")
         drv.disconnect()
+
+    def test_disconnect_releases_system(self):  # ordered teardown + gc.collect
+        fake, drv = self._install()
+        drv.connect()
+        drv.disconnect()
+        self.assertEqual(drv.get_status(), CameraStatus.DISCONNECTED)
+        self.assertGreaterEqual(fake._released["count"], 1)
+
+    def test_release_on_exit_is_idempotent(self):  # atexit safety net
+        fake, drv = self._install()
+        drv.connect()
+        drv._release_on_exit()           # simulate atexit firing on unclean exit
+        self.assertEqual(drv.get_status(), CameraStatus.DISCONNECTED)
+        drv._release_on_exit()           # firing again must never raise
 
 
 # --------------------------------------------------------------------------- #

@@ -198,7 +198,7 @@ class GenericCameraDriver(CameraDriver):
                 timestamp=time.monotonic(),
                 frame_id=self._next_frame_id(),
                 camera_name=self.config.name,
-                pixel_format=self.config.pixel_format,
+                pixel_format=self.config.output_pixel_format,
                 metadata={"simulated": True, "n_spots": self._n_spots},
             )
             with self._latest_lock:

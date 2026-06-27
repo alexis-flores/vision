@@ -296,18 +296,21 @@ svc.add_cameras_from_config("config/camera.json",
 The Spinnaker driver works with any BlackFly S over PySpin. On `start_stream`
 it sets `AcquisitionMode=Continuous` and `StreamBufferHandlingMode=NewestOnly`
 (low-latency, no stale backlog), and every frame is converted on the host to
-the config's `pixel_format` via `ImageProcessor` (legacy `img.Convert` on older
-SDKs).
+the config's `output_pixel_format` via `ImageProcessor` (legacy `img.Convert` on
+older SDKs).
 
 For **color** cameras this debayers automatically. Example config
 `config/bfs_u3_16s2c.json` targets the **BFS-U3-16S2C-CS** (1.6 MP, color,
 CS-mount, Sony IMX273, 1440×1080): the camera transmits its native `BayerRG8`
-(`extra.device_pixel_format`) and the host produces 3-channel `BGR8`
-(`pixel_format`) ready for the cueing system and GUI.
+(`device_pixel_format` — the real on-device PixelFormat register, 1 byte/px for
+low USB bandwidth) and the host debayers each frame to 3-channel `BGR8`
+(`output_pixel_format`) ready for the cueing system and GUI.
 
 Optics: a **Kowa LM5JCM 5 mm f/2.8–16** C-mount lens (2/3″ image circle) gives
-≈ 52.8° horizontal FOV on this sensor — well within NFR-004 (≥30°). Note the
-C-mount lens needs a **5 mm C-to-CS adapter ring** on the CS-mount body.
+≈ 52.8° horizontal FOV (VFOV ≈ 40.9°, DFOV ≈ 63.7°) on this sensor — well within
+NFR-004 (≥30°). At a working distance of ≈ 3 m (usable 2–4 m) that's a linear FOV
+of ≈ 2.98 m × 2.23 m (see `lens.py`). Note the C-mount lens needs a **5 mm
+C-to-CS adapter ring** on the CS-mount body.
 
 ```python
 svc.add_cameras_from_config("config/bfs_u3_16s2c.json",
@@ -341,12 +344,11 @@ applies on `connect()`. Not every field is sent to hardware — some are advisor
 (they only drive `validate()` warnings or documentation).
 
 **Applied to the camera:** `serial` / `device_index` (selection), `resolution`
-(→ Width/Height), `fps`, `exposure_us`, `gain_db`, `extra.device_pixel_format`
-(device format), and `pixel_format` (host debayer **output**).
+(→ Width/Height), `fps`, `exposure_us`, `gain_db`, `device_pixel_format` (the
+camera's on-the-wire format), and `output_pixel_format` (host debayer **output**).
 
 **Advisory only (not sent):** `model`, `max_resolution`, `max_fps`, `bit_depth`,
-`dynamic_range_db`, `sensor_format`, `lens_fov_deg`, `focal_length_mm`, and the
-`extra` notes.
+`dynamic_range_db`, `sensor_format`, `lens_fov_deg`, and `focal_length_mm`.
 
 What to set / tune for your rig:
 
@@ -361,10 +363,10 @@ What to set / tune for your rig:
 - **`gain_db`** — keep at `0`; raise only if still too dark after exposure.
 - **`fps`** — `60` meets NFR-001; the camera can do more but 60 is comfortable
   over USB3.
-- **Leave** `device_pixel_format: BayerRG8` + `pixel_format: BGR8` as-is — that
-  pair is the color debayer setup.
+- **Leave** `device_pixel_format: BayerRG8` + `output_pixel_format: BGR8` as-is —
+  that pair is the color debayer setup (camera sends raw Bayer; host debayers).
 
-The **C-to-CS adapter** is a physical part (the config only notes it).
+The **C-to-CS adapter** is a physical part — see the optics note above.
 
 ### First-time hardware bring-up (Ubuntu 22.04)
 

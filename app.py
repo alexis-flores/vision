@@ -28,8 +28,10 @@ import sys
 import time
 from typing import Optional
 
+from vision.camera_driver import CameraError
 from vision.camera_service import CameraService
 from vision.camera_types import CameraConfig, CameraFeature
+from vision.config_loader import ConfigError
 from vision.cueing_system import CueingSystem
 from vision.frame_buffers import CircularFrameBuffer, FIFOFrameBuffer
 
@@ -194,7 +196,12 @@ def main(argv=None) -> int:
         log.warning("--inject-faults is sim-only; ignoring for backend %r",
                     args.backend)
 
-    svc, cam = _build_service(args)
+    try:
+        svc, cam = _build_service(args)
+    except (CameraError, ConfigError) as e:
+        log.error("Startup failed: %s", e)   # bad/missing config, backend setup
+        return 1
+
     gui_fifo = FIFOFrameBuffer(capacity=4)           # service -> GUI
 
     # Cueing and the GUI are independent fan-out branches; either can be omitted.
@@ -209,18 +216,27 @@ def main(argv=None) -> int:
         log.warning("--no-cueing with --headless: no consumer attached; "
                     "frames will just be acquired and dropped.")
 
-    svc.connect(cam)
-    if cueing is not None:
-        cueing.start()
-    svc.start_streaming(cam)
-    log.info("Streaming %r on backend=%s (cueing=%s)", cam, args.backend,
-             "off" if cueing is None else "on")
-
+    rc = 0
     try:
+        svc.connect(cam)
+        if cueing is not None:
+            cueing.start()
+        svc.start_streaming(cam)
+        log.info("Streaming %r on backend=%s (cueing=%s)", cam, args.backend,
+                 "off" if cueing is None else "on")
         if args.headless:
             _run_headless(args, svc, cam, cueing)
         else:
             _run_gui(gui_fifo, f"{cam} ({args.backend})", svc, cam)
+    except (CameraError, ConfigError) as e:
+        # Expected operational failure (SDK missing, no camera, connect/stream
+        # error): one clean line, no traceback. Unexpected errors still
+        # propagate so genuine bugs surface with a full trace.
+        log.error("%s", e)
+        rc = 1
+    except KeyboardInterrupt:
+        log.info("Interrupted; shutting down.")
+        rc = 130
     finally:
         svc.stop_streaming(cam)
         if cueing is not None:
@@ -232,7 +248,7 @@ def main(argv=None) -> int:
                  "cueing consumed=%s", svc.get_status(cam).name,
                  st["frames_delivered"], st["malformed_frames"],
                  st["reconnects"], consumed)
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

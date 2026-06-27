@@ -244,7 +244,7 @@ class SpinnakerCameraDriver(CameraDriver):
             camera_name=self.config.name,
             hw_timestamp_ns=hw_ts,
             device_frame_id=device_fid,
-            pixel_format=self.config.pixel_format,
+            pixel_format=self.config.output_pixel_format,
         )
 
     def _chunk_frame_id(self, img) -> Optional[int]:
@@ -464,7 +464,7 @@ class SpinnakerCameraDriver(CameraDriver):
         array if no mapping or conversion path is available.
         """
         PySpin = self._pyspin
-        target = self._spin_pixel_format(self.config.pixel_format)
+        target = self._spin_pixel_format(self.config.output_pixel_format)
         if target is None:
             return np.array(img.GetNDArray(), copy=True)
         try:
@@ -502,7 +502,7 @@ class SpinnakerCameraDriver(CameraDriver):
         cfg = self.config
         # Optional device-side source format (e.g. "BayerRG8" for color), so
         # the camera transmits its native format and the host debayers.
-        dev_fmt = cfg.extra.get("device_pixel_format")
+        dev_fmt = cfg.device_pixel_format
         if dev_fmt:
             try:
                 const = getattr(self._pyspin, f"PixelFormat_{dev_fmt}")

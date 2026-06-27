@@ -147,7 +147,7 @@ class OpenCVCameraDriver(CameraDriver):
                 timestamp=time.monotonic(),
                 frame_id=self._next_frame_id(),
                 camera_name=self.config.name,
-                pixel_format=self.config.pixel_format,
+                pixel_format=self.config.output_pixel_format,
             )
             with self._cond:
                 self._latest = frame

@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -80,12 +81,13 @@ class TestConfigLoader(unittest.TestCase):  # UT-001
         path = self._write({
             "name": "c0", "model": "m", "max_resolution": [1024, 1024],
             "max_fps": 60.0, "features": ["GAIN", "EXPOSURE"],
-            "pixel_format": "Mono8", "resolution": [800, 600], "fps": 60.0})
+            "output_pixel_format": "Mono8", "resolution": [800, 600],
+            "fps": 60.0})
         cfg = load_camera_config(path)
         self.assertEqual(cfg.name, "c0")
         self.assertEqual(cfg.resolution, (800, 600))
         self.assertTrue(cfg.supports(CameraFeature.GAIN))
-        self.assertEqual(cfg.pixel_format, PixelFormat.MONO8)
+        self.assertEqual(cfg.output_pixel_format, PixelFormat.MONO8)
 
     def test_multi_camera(self):
         path = self._write({"cameras": [
@@ -446,7 +448,8 @@ class TestRegressions(unittest.TestCase):
 
     def test_bad_pixel_format_raises_config_error(self):
         fd, path = tempfile.mkstemp(suffix=".json")
-        os.write(fd, json.dumps({"name": "x", "pixel_format": "BadFmt"}).encode())
+        os.write(fd, json.dumps(
+            {"name": "x", "output_pixel_format": "BadFmt"}).encode())
         os.close(fd)
         self.addCleanup(os.remove, path)
         with self.assertRaises(ConfigError):
@@ -475,6 +478,15 @@ class TestScriptsImport(unittest.TestCase):
         self.assertEqual(ns3.fps, 30.0)
         self.assertFalse(ns.reset)                             # default: no reset
         self.assertTrue(app._parse_args(["--reset"]).reset)
+
+    def test_main_clean_exit_on_operational_error(self):
+        # An expected backend failure (e.g. SDK missing / no camera) must exit
+        # with code 1 and a clean message, NOT raise a traceback.
+        import app
+        with mock.patch.object(app, "_build_service",
+                               side_effect=CameraError("no device")):
+            rc = app.main(["--backend", "spinnaker", "--headless"])
+        self.assertEqual(rc, 1)
 
     def test_hardware_acceptance_imports(self):
         import hardware_acceptance
@@ -541,14 +553,14 @@ class TestSpinnakerHardware(unittest.TestCase):  # HW-001 (real device)
             self.assertEqual(
                 frame.data.ndim, 3,
                 f"Got a {frame.data.ndim}-D frame; expected 3-D color. The "
-                "camera isn't debayering to BGR — check 'pixel_format' (BGR8) "
-                "and 'extra.device_pixel_format' (BayerRG8) in the config, and "
+                "camera isn't debayering to BGR — check 'output_pixel_format' "
+                "(BGR8) and 'device_pixel_format' (BayerRG8) in the config, and "
                 "that ImageProcessor/Convert ran (see spinnaker_driver._convert).")
             self.assertEqual(
                 frame.data.shape[2], 3,
                 f"Got {frame.data.shape[2]} channels; expected 3 (BGR). "
                 "Pixel-format conversion produced the wrong layout — verify "
-                "'pixel_format': 'BGR8' in the config.")
+                "'output_pixel_format': 'BGR8' in the config.")
             self.assertEqual(
                 (frame.data.shape[1], frame.data.shape[0]), tuple(cfg.resolution),
                 f"Frame {frame.data.shape[1]}x{frame.data.shape[0]} != configured "
@@ -558,8 +570,8 @@ class TestSpinnakerHardware(unittest.TestCase):  # HW-001 (real device)
             self.assertEqual(
                 frame.data.dtype, np.uint8,
                 f"Frame dtype {frame.data.dtype} != uint8. Conversion target is "
-                "wrong — use an 8-bit 'pixel_format' (BGR8/Mono8), not a 16-bit "
-                "format, for the 8-bit pipeline.")
+                "wrong — use an 8-bit 'output_pixel_format' (BGR8/Mono8), not a "
+                "16-bit format, for the 8-bit pipeline.")
             self.assertIsNotNone(
                 frame.hw_timestamp_ns,
                 "No hardware timestamp — GetTimeStamp() returned nothing; the "

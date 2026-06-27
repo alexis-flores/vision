@@ -10,7 +10,7 @@
   "sensor_format": "2/3\"",
   "lens_fov_deg": 60.0,
   "focal_length_mm": 6.0,
-  "pixel_format": "BGR8",
+  "output_pixel_format": "BGR8",
   "features": ["GAIN", "EXPOSURE", "FRAME_RATE", "RESOLUTION", "BLACK_LEVEL", "GAMMA"],
   "resolution": [1024, 1024],
   "fps": 60.0,

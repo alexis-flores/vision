@@ -177,11 +177,11 @@ def _bfs_config(serial=None):
         name="bfs", model="BFS-U3-16S2C-CS", device_index=0, serial=serial,
         max_resolution=(1440, 1080), max_fps=226.0,
         resolution=(1440, 1080), fps=60.0, exposure_us=5000.0, gain_db=0.0,
-        pixel_format=PixelFormat.BGR8,
+        output_pixel_format=PixelFormat.BGR8,
         features=(CameraFeature.GAIN | CameraFeature.EXPOSURE
                   | CameraFeature.FRAME_RATE | CameraFeature.RESOLUTION
                   | CameraFeature.PIXEL_FORMAT),
-        extra={"device_pixel_format": "BayerRG8"})
+        device_pixel_format="BayerRG8")
 
 
 class TestSpinnakerDriverMocked(unittest.TestCase):

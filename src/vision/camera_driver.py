@@ -132,7 +132,7 @@ class CameraDriver(abc.ABC):
         self.connect()
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, *_exc: object) -> None:
         try:
             self.stop_stream()
         except CameraError:

@@ -275,7 +275,7 @@ def evaluate(m: Metrics, criteria: AcceptanceCriteria) -> AcceptanceReport:
         fmt_ok = fmt_ok and last.ndim == 3 and last.channels == 3
     if criteria.require_uint8:
         fmt_ok = fmt_ok and last.dtype == "uint8"
-    add(CheckResult("pixel_format", fmt_ok, fmt_detail))
+    add(CheckResult("output_pixel_format", fmt_ok, fmt_detail))
 
     # 4. Throughput (NFR-001). Allow a small tolerance: a compliant camera
     # measured over a finite window reads slightly under nominal (the last

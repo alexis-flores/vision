@@ -101,12 +101,16 @@ class CameraConfig:
     fps: Optional[float] = None
     exposure_us: Optional[float] = None
     gain_db: Optional[float] = None
-    pixel_format: PixelFormat = PixelFormat.BGR8
-
-    # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
-    #   Extra backend-specific options (passed through verbatim)
-    # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
-    extra: Dict[str, Any] = field(default_factory=dict)
+    # Two distinct pixel formats:
+    #   device_pixel_format — what the CAMERA transmits over the wire (its real
+    #     on-device PixelFormat register, e.g. "BayerRG8" so the host debayers;
+    #     1 byte/px = lower USB bandwidth). None = leave the device's current
+    #     format. Backend-specific string (GenICam name).
+    #   output_pixel_format — what the host converts each frame TO for downstream
+    #     consumers (e.g. BGR8). Drives host-side conversion only; never the
+    #     device.
+    device_pixel_format: Optional[str] = None
+    output_pixel_format: PixelFormat = PixelFormat.BGR8
 
     def __post_init__(self) -> None:
         self.max_pixel_count = self.max_resolution[0] * self.max_resolution[1]

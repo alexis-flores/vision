@@ -79,14 +79,14 @@ def _config_from_dict(d: Dict[str, Any]) -> CameraConfig:
     data = dict(d) # shallow copy; we pop keys that need transforming
     try:
         features = _parse_features(data.pop("features", []))
-        pixfmt_name = data.pop("pixel_format", None)
-        pixel_format = (PixelFormat(pixfmt_name) if pixfmt_name
-                        else PixelFormat.BGR8)
+        pixfmt_name = data.pop("output_pixel_format", None)
+        output_pixel_format = (PixelFormat(pixfmt_name) if pixfmt_name
+                               else PixelFormat.BGR8)
         for tup_key in ("max_resolution", "resolution"):
             if tup_key in data and data[tup_key] is not None:
                 data[tup_key] = tuple(data[tup_key])
         cfg = CameraConfig(features=features,
-                           pixel_format=pixel_format, **data)
+                           output_pixel_format=output_pixel_format, **data)
     except (TypeError, ValueError) as e:
         raise ConfigError(f"Invalid configuration field: {e}") from e
     log.info("Loaded camera config %r (%s)", cfg.name, cfg.model)

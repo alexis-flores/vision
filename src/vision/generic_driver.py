@@ -10,6 +10,7 @@ replace the _sim_* hooks with vendor SDK calls.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Optional
@@ -20,6 +21,8 @@ from .camera_driver import (CameraDriver, CameraError, CameraTimeoutError,
                            FeatureNotSupportedError, MalformedFrameError)
 from .camera_types import (CameraConfig, CameraFeature, CameraFrame,
                           CameraStatus)
+
+log = logging.getLogger(__name__)
 
 
 class GenericCameraDriver(CameraDriver):
@@ -96,6 +99,9 @@ class GenericCameraDriver(CameraDriver):
         self._stop_evt.set()
         if self._gen_thread is not None:
             self._gen_thread.join(timeout=2.0)
+            if self._gen_thread.is_alive():
+                log.warning("Sim thread for %r did not exit within 2s",
+                            self.config.name)
             self._gen_thread = None
         self._frame_evt.clear()
 

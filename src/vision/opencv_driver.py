@@ -10,6 +10,7 @@ Condition; read_frame() waits on that condition with the caller's timeout.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Optional
@@ -20,6 +21,8 @@ from .camera_driver import (CameraDriver, CameraError, CameraTimeoutError,
                            FeatureNotSupportedError)
 from .camera_types import (CameraConfig, CameraFeature, CameraFrame,
                           CameraStatus)
+
+log = logging.getLogger(__name__)
 
 # attribute name -> (cv2 property id name, required feature)
 _ATTR_MAP = {
@@ -101,6 +104,9 @@ class OpenCVCameraDriver(CameraDriver):
         self._stop_evt.set()
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=2.0)
+            if self._capture_thread.is_alive():
+                log.warning("Capture thread for %r did not exit within 2s",
+                            self.config.name)
             self._capture_thread = None
         with self._cond:
             self._latest = None

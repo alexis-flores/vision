@@ -17,6 +17,11 @@ reused as-is for every backend.
     python app.py --backend opencv --device 0       # webcam + viewer
     python app.py --headless --seconds 10           # any backend, no GUI
     python app.py --headless --inject-faults        # sim NFR-005/006 demo
+    python app.py --config multi.json               # several cameras at once
+
+A config with a top-level "cameras" list runs every camera concurrently — each
+on its own service worker thread with its own cueing + GUI fan-out branch. A
+single-camera setup is just the N=1 case (unchanged behavior).
 """
 
 from __future__ import annotations
@@ -26,12 +31,13 @@ import logging
 import os
 import sys
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
 from vision.camera_driver import CameraError
 from vision.camera_service import CameraService
 from vision.camera_types import CameraConfig, CameraFeature
-from vision.config_loader import ConfigError
+from vision.config_loader import ConfigError, load_camera_configs
 from vision.cueing_system import CueingSystem
 from vision.frame_buffers import CircularFrameBuffer, FIFOFrameBuffer
 
@@ -80,10 +86,13 @@ def _parse_args(argv=None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def _make_driver(args: argparse.Namespace, cfg: CameraConfig):
-    """Construct the driver for the chosen backend, applying CLI overrides
-    (None = keep the config value). PySpin is imported only here, only when
-    needed, so the SDK stays optional."""
+def _has_overrides(args: argparse.Namespace) -> bool:
+    return (bool(args.serial) or args.exposure is not None
+            or args.gain is not None or args.fps is not None)
+
+
+def _apply_overrides(args: argparse.Namespace, cfg: CameraConfig) -> None:
+    """Apply CLI overrides onto a config in place (None = keep config value)."""
     if args.serial:
         cfg.serial = args.serial
     if args.exposure is not None:
@@ -92,6 +101,12 @@ def _make_driver(args: argparse.Namespace, cfg: CameraConfig):
         cfg.gain_db = args.gain
     if args.fps is not None:
         cfg.fps = args.fps
+
+
+def _make_driver_for_backend(args: argparse.Namespace, cfg: CameraConfig):
+    """Construct the driver for the chosen backend (backend selection only;
+    CLI overrides are applied separately by _apply_overrides). PySpin is
+    imported only here, only for spinnaker, so the SDK stays optional."""
     if args.backend == "sim":
         from vision.generic_driver import GenericCameraDriver
         return GenericCameraDriver(cfg, n_spots=6)
@@ -116,35 +131,62 @@ def _default_config(backend: str, device: int) -> CameraConfig:
 
 
 def _build_service(args: argparse.Namespace):
-    """Register one camera on a fresh service; returns (service, name)."""
+    """Register all configured cameras on a fresh service; returns (svc, names).
+
+    A config with a top-level "cameras" list yields multiple cameras, each on
+    its own worker thread. CLI overrides (--serial/--exposure/--gain/--fps) are
+    applied only to a single-camera setup; for a multi-camera config each camera
+    keeps its own config values (one --serial cannot bind N physical units)."""
     svc = CameraService()
     config = args.config
     if config is None and args.backend == "spinnaker":
         config = DEFAULT_SPINNAKER_CONFIG  # spinnaker needs a real device config
     if config:
-        names = svc.add_cameras_from_config(
-            config, lambda c: _make_driver(args, c))
-        return svc, names[0]
+        cfgs = load_camera_configs(config)
+        single = len(cfgs) == 1
+        if not single and _has_overrides(args):
+            log.warning("--serial/--exposure/--gain/--fps ignored for a "
+                        "multi-camera config (%d cameras); each camera uses "
+                        "its own config values.", len(cfgs))
+        names = []
+        for c in cfgs:
+            if single:
+                _apply_overrides(args, c)
+            svc.add_camera(c.name, _make_driver_for_backend(args, c))
+            names.append(c.name)
+        return svc, names
     cfg = _default_config(args.backend, args.device)
-    svc.add_camera(cfg.name, _make_driver(args, cfg))
-    return svc, cfg.name
+    _apply_overrides(args, cfg)
+    svc.add_camera(cfg.name, _make_driver_for_backend(args, cfg))
+    return svc, [cfg.name]
 
 
-def _run_gui(gui_fifo: FIFOFrameBuffer, title: str, svc: CameraService,
-             cam: str) -> None:
+@dataclass
+class _CamRun:
+    """Per-camera consumer-side wiring for one runner session."""
+    name: str
+    gui_fifo: FIFOFrameBuffer
+    cueing: Optional[CueingSystem]
+
+
+def _run_gui(runs: List[_CamRun], svc: CameraService, backend: str) -> None:
     from PyQt6.QtWidgets import QApplication  # imported only when GUI is used
     from gui_bridge import CameraViewer
     app = QApplication(sys.argv)
-    win = CameraViewer(gui_fifo, title=title,
-                       health_fn=lambda: svc.get_health(cam),
-                       stats_fn=lambda: svc.stats(cam))
-    win.show()
-    log.info("Close the window to stop.")
-    app.exec()
+    viewers = []  # hold refs so the windows aren't garbage-collected
+    for r in runs:
+        name = r.name  # bind per-iteration name into the lambda defaults
+        win = CameraViewer(r.gui_fifo, title=f"{name} ({backend})",
+                           health_fn=lambda n=name: svc.get_health(n),
+                           stats_fn=lambda n=name: svc.stats(n))
+        win.show()
+        viewers.append(win)
+    log.info("Close the window(s) to stop.")
+    app.exec()  # one event loop; Qt quits when the last window closes
 
 
-def _run_headless(args: argparse.Namespace, svc: CameraService, cam: str,
-                  cueing: Optional[CueingSystem]) -> None:
+def _run_headless(args: argparse.Namespace, svc: CameraService,
+                  runs: List[_CamRun]) -> None:
     log.info("Headless run for %.1fs (Ctrl-C to stop early).", args.seconds)
     inject = args.inject_faults and args.backend == "sim"
     t_end = time.monotonic() + args.seconds
@@ -152,19 +194,25 @@ def _run_headless(args: argparse.Namespace, svc: CameraService, cam: str,
     try:
         while time.monotonic() < t_end:
             time.sleep(1.0)
-            st = svc.stats(cam)
-            cue = (f"{cueing.frames_consumed} consumed, {cueing.frames_errored} "
-                   f"errored" if cueing is not None else "off")
-            log.info("delivered=%d malformed=%d reconnects=%d | cueing %s",
-                     st["frames_delivered"], st["malformed_frames"],
-                     st["reconnects"], cue)
+            for r in runs:
+                st = svc.stats(r.name)
+                cue = (f"{r.cueing.frames_consumed} consumed, "
+                       f"{r.cueing.frames_errored} errored"
+                       if r.cueing is not None else "off")
+                log.info("%s: delivered=%d malformed=%d reconnects=%d | "
+                         "cueing %s", r.name, st["frames_delivered"],
+                         st["malformed_frames"], st["reconnects"], cue)
             if inject and not injected:
                 injected = True
-                log.info(">>> Injecting 3 malformed frames (NFR-006)")
-                svc._entry(cam).driver.inject_malformed(3)
-                time.sleep(0.5)  # let them be skipped before the crash clears faults
-                log.info(">>> Injecting backend crash (NFR-005)")
-                svc._entry(cam).driver.inject_backend_crash()
+                for r in runs:
+                    log.info(">>> [%s] Injecting 3 malformed frames (NFR-006)",
+                             r.name)
+                    svc._entry(r.name).driver.inject_malformed(3)
+                time.sleep(0.5)  # let them be skipped before the crash
+                for r in runs:
+                    log.info(">>> [%s] Injecting backend crash (NFR-005)",
+                             r.name)
+                    svc._entry(r.name).driver.inject_backend_crash()
     except KeyboardInterrupt:
         log.info("Interrupted; shutting down.")
 
@@ -174,12 +222,13 @@ def _run_reset(args: argparse.Namespace) -> int:
     if args.backend != "spinnaker":
         log.error("--reset is only supported for --backend spinnaker")
         return 1
-    svc, cam = _build_service(args)
+    svc, names = _build_service(args)
     try:
-        svc.connect(cam)            # config is applied then overwritten by reset
-        svc.reset_to_defaults(cam)
-        log.info("Camera %r reset to factory defaults (and set as power-on "
-                 "default — power-cycles will reset too).", cam)
+        for name in names:
+            svc.connect(name)       # config is applied then overwritten by reset
+            svc.reset_to_defaults(name)
+            log.info("Camera %r reset to factory defaults (and set as power-on "
+                     "default — power-cycles will reset too).", name)
         return 0
     except Exception as e:
         log.error("Reset failed: %s", e)
@@ -197,37 +246,42 @@ def main(argv=None) -> int:
                     args.backend)
 
     try:
-        svc, cam = _build_service(args)
+        svc, names = _build_service(args)
     except (CameraError, ConfigError) as e:
         log.error("Startup failed: %s", e)   # bad/missing config, backend setup
         return 1
 
-    gui_fifo = FIFOFrameBuffer(capacity=4)           # service -> GUI
-
-    # Cueing and the GUI are independent fan-out branches; either can be omitted.
-    cueing = None
-    if not args.no_cueing:
-        cueing_ring = CircularFrameBuffer(capacity=64)   # service -> cueing
-        svc.attach_sink(cam, cueing_ring)
-        cueing = CueingSystem(cueing_ring)               # ingests frames; pipeline TBD
-    if not args.headless:
-        svc.attach_sink(cam, gui_fifo)                   # service -> GUI
+    # Per-camera consumer wiring. Cueing and the GUI are independent fan-out
+    # branches (either can be omitted); each camera gets its own pair.
+    runs: List[_CamRun] = []
+    for name in names:
+        gui_fifo = FIFOFrameBuffer(capacity=4)               # service -> GUI
+        cueing = None
+        if not args.no_cueing:
+            cueing_ring = CircularFrameBuffer(capacity=64)   # service -> cueing
+            svc.attach_sink(name, cueing_ring)
+            cueing = CueingSystem(cueing_ring)               # pipeline TBD
+        if not args.headless:
+            svc.attach_sink(name, gui_fifo)                  # service -> GUI
+        runs.append(_CamRun(name=name, gui_fifo=gui_fifo, cueing=cueing))
     if args.no_cueing and args.headless:
         log.warning("--no-cueing with --headless: no consumer attached; "
                     "frames will just be acquired and dropped.")
 
     rc = 0
     try:
-        svc.connect(cam)
-        if cueing is not None:
-            cueing.start()
-        svc.start_streaming(cam)
-        log.info("Streaming %r on backend=%s (cueing=%s)", cam, args.backend,
-                 "off" if cueing is None else "on")
+        for r in runs:
+            svc.connect(r.name)
+            if r.cueing is not None:
+                r.cueing.start()
+            svc.start_streaming(r.name)
+        log.info("Streaming %d camera(s) on backend=%s (cueing=%s): %s",
+                 len(runs), args.backend, "off" if args.no_cueing else "on",
+                 ", ".join(r.name for r in runs))
         if args.headless:
-            _run_headless(args, svc, cam, cueing)
+            _run_headless(args, svc, runs)
         else:
-            _run_gui(gui_fifo, f"{cam} ({args.backend})", svc, cam)
+            _run_gui(runs, svc, args.backend)
     except (CameraError, ConfigError) as e:
         # Expected operational failure (SDK missing, no camera, connect/stream
         # error): one clean line, no traceback. Unexpected errors still
@@ -238,16 +292,18 @@ def main(argv=None) -> int:
         log.info("Interrupted; shutting down.")
         rc = 130
     finally:
-        svc.stop_streaming(cam)
-        if cueing is not None:
-            cueing.stop()
+        for r in runs:
+            svc.stop_streaming(r.name)
+            if r.cueing is not None:
+                r.cueing.stop()
         svc.shutdown()
-        st = svc.stats(cam)
-        consumed = "off" if cueing is None else cueing.frames_consumed
-        log.info("Final: status=%s delivered=%d malformed=%d reconnects=%d | "
-                 "cueing consumed=%s", svc.get_status(cam).name,
-                 st["frames_delivered"], st["malformed_frames"],
-                 st["reconnects"], consumed)
+        for r in runs:
+            st = svc.stats(r.name)
+            consumed = "off" if r.cueing is None else r.cueing.frames_consumed
+            log.info("Final %s: status=%s delivered=%d malformed=%d "
+                     "reconnects=%d | cueing consumed=%s", r.name,
+                     svc.get_status(r.name).name, st["frames_delivered"],
+                     st["malformed_frames"], st["reconnects"], consumed)
     return rc
 
 

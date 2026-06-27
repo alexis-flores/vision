@@ -151,10 +151,19 @@ python app.py --headless --inject-faults        # sim NFR-005/006 demo
 python app.py --no-cueing                       # display-only: frames -> GUI, no cueing
 python app.py --backend spinnaker --exposure 12000 --gain 0   # tune brightness live
 python app.py --backend spinnaker --reset       # factory-reset the camera, then exit
+python app.py --config multi.json               # several cameras at once
 ```
 
 Exposure/gain/fps overrides apply at connect; the live HUD shows the resulting
 exposure and gain so you can dial in "normal" brightness while watching the feed.
+
+**Multiple cameras.** A config with a top-level `"cameras": [ … ]` list runs every
+camera **concurrently** — each on its own service worker thread with its own cueing
++ GUI fan-out branch (so one camera stalling never affects another). Headless logs
+per-camera stats; the GUI opens one window per camera. A single-camera setup is just
+the N=1 case (behavior unchanged). CLI overrides (`--serial/--exposure/--gain/--fps`)
+apply only to a single-camera setup; with a multi-camera config they're ignored
+(one `--serial` can't bind N units) and each camera uses its own config values.
 | Flag | Default | Description |
 |---|---|---|
 | `--backend {sim,opencv,spinnaker}` | `sim` | which camera driver to run |
@@ -367,6 +376,45 @@ What to set / tune for your rig:
   that pair is the color debayer setup (camera sends raw Bayer; host debayers).
 
 The **C-to-CS adapter** is a physical part — see the optics note above.
+
+### Scaling to a multi-camera rig (considerations — not yet implemented)
+
+The runner already drives **N cameras concurrently** (each on its own worker
+thread + fan-out), but a production multi-camera rig usually needs three things
+the driver doesn't do yet. They're deliberately deferred (YAGNI for a single
+free-running camera) and **none affect single-camera operation** — they're
+opt-in, off by default. Add them when you actually build the rig.
+
+- **Hardware trigger / shutter sync.** Today every camera **free-runs**
+  (`TriggerMode` defaults Off; the `TRIGGER` feature in `camera_types.py` is
+  unused — there are no `TriggerMode`/`TriggerSource`/`LineSelector` nodes in
+  `spinnaker_driver.py`). A rig that **fuses** views (stereo, triangulation,
+  wider FOV) needs every camera to expose the **same instant** — otherwise a
+  moving target lands in different pixels per camera and the fusion is wrong.
+  Implementation: pick one **primary** (TriggerMode Off, drives a GPIO line on
+  exposure) and make the rest **secondary** (TriggerMode On, TriggerSource = the
+  wired line, edge `TriggerActivation`), plus physical trigger wiring (camera-to-
+  camera GPIO or an external generator). Until then, the per-frame device
+  timestamp (`hw_timestamp_ns`, already captured) only *loosely* time-aligns
+  independent streams — it is **not** sub-frame shutter sync.
+
+- **Broader config (more GenICam nodes).** `set_config`/`_ATTR_MAP` is a curated
+  whitelist (gain, exposure, fps, width/height, black level, gamma). A real rig
+  often needs more: the trigger nodes above, **binning**/decimation, explicit
+  **ROI offset** (beyond the reset-to-min the driver already does), white
+  balance, LUT — and for **GigE** cameras, `DeviceLinkThroughputLimit` plus
+  packet size/delay (`GevSCPSPacketSize`/`GevSCPD`) to share link bandwidth
+  across cameras. Any node is reachable via `GetNodeMap().GetNode(name)`;
+  extending `_ATTR_MAP` (with auto-mode-off handling where needed, as exposure/
+  gain already do) is the additive path — no change to the validated frame path.
+
+- **Stream buffer count.** The driver uses the SDK's **default** buffer count
+  with `StreamBufferHandlingMode=NewestOnly`. With **multiple cameras sharing one
+  USB3 controller or PCIe lane**, transient bandwidth contention can drop frames
+  if the per-camera buffer pool is too small. Tuning `StreamBufferCountMode=Manual`
+  + `StreamBufferCountManual` (a few extra buffers per camera) absorbs bursts;
+  size it by watching `StreamLostFrameCount`/`StreamDroppedFrameCount` (already in
+  `get_health()`). A single camera at 60 fps doesn't need this — 0 drops observed.
 
 ### First-time hardware bring-up (Ubuntu 22.04)
 

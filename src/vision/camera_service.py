@@ -26,6 +26,10 @@ class _CameraEntry:
     sinks: List[FrameSink] = field(default_factory=list)
     worker: Optional[threading.Thread] = None
     stop_evt: threading.Event = field(default_factory=threading.Event)
+    # Stats counters: written ONLY by this camera's single worker thread
+    # (_stream_worker / _attempt_reconnect) and read by stats() from other
+    # threads. Single-writer + atomic plain-int reads ⇒ GIL-safe, so no lock is
+    # taken on the per-frame hot path. (Do not add a second writer.)
     frames_delivered: int = 0
     read_timeouts: int = 0
     malformed_frames: int = 0
@@ -49,7 +53,6 @@ class CameraService:
     """
 
     READ_TIMEOUT_S = 1.0 # per-iteration blocking read budget
-    ERROR_RETRY_DELAY_S = 0.25 # backoff after driver error in worker
     RECONNECT_DELAY_S = 0.5 # wait between reconnect attempts (NFR-005)
     # ~60 x 0.5s = a ~30s window, enough time for a human to replug a hot-removed
     # camera (and to ride out a USB re-enumeration); reconnects within ~0.5s once
@@ -175,6 +178,12 @@ class CameraService:
         entry.stop_evt.set()
         if entry.worker is not None:
             entry.worker.join(timeout=3.0)
+            if entry.worker.is_alive():
+                # Worker didn't exit (e.g. stuck in a slow driver connect during
+                # a reconnect). Surface it rather than silently abandoning the
+                # thread; the driver stop/disconnect below still cleans up state.
+                log.warning("Worker for %r did not exit within 3s; abandoning",
+                            name)
             entry.worker = None
         if entry.driver.get_status() == CameraStatus.STREAMING:
             entry.driver.stop_stream()

@@ -62,7 +62,9 @@ class CueingSystem:
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
 
-        # Telemetry
+        # Telemetry: written ONLY by the single cueing worker thread (_run),
+        # read by other threads (stats/logging). Single-writer + atomic int
+        # reads ⇒ GIL-safe, no lock needed.
         self.frames_consumed = 0
         self.frames_errored = 0
         self.last_frame_id: Optional[int] = None
@@ -84,9 +86,11 @@ class CueingSystem:
         self._stop_evt.set()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                log.warning("Cueing worker did not exit within 3s; abandoning")
             self._thread = None
-        log.info("Cueing system stopped (consumed=%d errored=%d)",
-                 self.frames_consumed, self.frames_errored)
+            log.info("Cueing system stopped (consumed=%d errored=%d)",
+                     self.frames_consumed, self.frames_errored)
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Worker loop

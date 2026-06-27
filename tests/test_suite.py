@@ -315,6 +315,30 @@ class TestCameraService(unittest.TestCase):
             os.path.abspath(path), lambda c: GenericCameraDriver(c))
         self.assertIn("bfly0", names)
 
+    def test_two_cameras_stream_concurrently(self):  # multi-camera service
+        svc = CameraService()
+        for n in ("camA", "camB"):
+            svc.add_camera(n, GenericCameraDriver(
+                basic_config(n, resolution=(160, 120),
+                             max_resolution=(160, 120)), n_spots=3))
+        sink_a, sink_b = FIFOFrameBuffer(8), FIFOFrameBuffer(8)
+        svc.attach_sink("camA", sink_a)
+        svc.attach_sink("camB", sink_b)
+        svc.connect_all()
+        svc.start_streaming("camA")
+        svc.start_streaming("camB")
+        try:
+            _wait_until(lambda: svc.stats("camA")["frames_delivered"] > 0
+                        and svc.stats("camB")["frames_delivered"] > 0,
+                        timeout=3.0)
+            self.assertGreater(svc.stats("camA")["frames_delivered"], 0)
+            self.assertGreater(svc.stats("camB")["frames_delivered"], 0)
+            self.assertEqual(set(svc.camera_names()), {"camA", "camB"})
+        finally:
+            svc.shutdown()
+        self.assertEqual(svc.get_status("camA"), CameraStatus.DISCONNECTED)
+        self.assertEqual(svc.get_status("camB"), CameraStatus.DISCONNECTED)
+
     def test_stop_streaming_idempotent_quiet(self):  # cosmetic double-log fix
         self.svc.connect("svccam")
         self.svc.start_streaming("svccam")
@@ -487,6 +511,53 @@ class TestScriptsImport(unittest.TestCase):
                                side_effect=CameraError("no device")):
             rc = app.main(["--backend", "spinnaker", "--headless"])
         self.assertEqual(rc, 1)
+
+    def test_runner_drives_multiple_cameras(self):  # multi-camera runner
+        import app
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.write(fd, json.dumps({"cameras": [
+            {"name": "m0", "max_resolution": [160, 120],
+             "resolution": [160, 120], "fps": 60.0,
+             "features": ["RESOLUTION", "FRAME_RATE"]},
+            {"name": "m1", "max_resolution": [160, 120],
+             "resolution": [160, 120], "fps": 60.0,
+             "features": ["RESOLUTION", "FRAME_RATE"]}]}).encode())
+        os.close(fd)
+        try:
+            with self.assertLogs("app", level="INFO") as cm:
+                rc = app.main(["--backend", "sim", "--config", path,
+                               "--headless", "--seconds", "1"])
+            self.assertEqual(rc, 0)
+            joined = "\n".join(cm.output)
+            self.assertIn("Final m0", joined)     # both cameras ran + reported
+            self.assertIn("Final m1", joined)
+        finally:
+            os.unlink(path)
+
+    def test_multi_camera_config_ignores_cli_overrides(self):
+        # One --serial can't bind N cameras: the runner warns and each camera
+        # keeps its own config serial.
+        import app
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.write(fd, json.dumps({"cameras": [
+            {"name": "s0", "serial": "AAA", "max_resolution": [160, 120]},
+            {"name": "s1", "serial": "BBB", "max_resolution": [160, 120]}]
+        }).encode())
+        os.close(fd)
+        try:
+            ns = app._parse_args(["--backend", "sim", "--config", path,
+                                  "--serial", "ZZZ", "--headless"])
+            with self.assertLogs("app", level="WARNING") as cm:
+                svc, names = app._build_service(ns)
+            try:
+                self.assertEqual(set(names), {"s0", "s1"})
+                self.assertTrue(any("ignored" in m for m in cm.output))
+                self.assertEqual(svc._entry("s0").driver.config.serial, "AAA")
+                self.assertEqual(svc._entry("s1").driver.config.serial, "BBB")
+            finally:
+                svc.shutdown()
+        finally:
+            os.unlink(path)
 
     def test_hardware_acceptance_imports(self):
         import hardware_acceptance

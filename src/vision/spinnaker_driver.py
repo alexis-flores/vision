@@ -156,6 +156,8 @@ class SpinnakerCameraDriver(CameraDriver):
             log.debug("atexit cleanup error: %s", e)
 
     def start_stream(self) -> None:
+        if self.get_status() == CameraStatus.STREAMING:
+            return  # idempotent, matching generic_driver / opencv_driver
         self._require(CameraStatus.CONNECTED, "start_stream")
         try:
             self._configure_acquisition()
@@ -311,38 +313,42 @@ class SpinnakerCameraDriver(CameraDriver):
 
     def get_health(self) -> dict:
         """Device temperature (°C) plus best-effort transport counters. Safe to
-        call while streaming; reads are guarded so a missing node or transient
-        contention never raises."""
-        if self._cam is None or self._pyspin is None:
+        call while streaming AND concurrently with a reconnect: it runs on the
+        GUI / acceptance thread while the worker thread may clear self._cam in
+        disconnect(), so we snapshot the handle once and use the local — a
+        torn read can't NPE. Every node read is guarded too, so a missing node
+        or a handle being torn down is a no-op, not a raise."""
+        cam, pyspin = self._cam, self._pyspin
+        if cam is None or pyspin is None:
             return {}
         health: dict = {}
-        temp_node = getattr(self._cam, "DeviceTemperature", None)
+        temp_node = getattr(cam, "DeviceTemperature", None)
         if temp_node is not None:
             try:
                 health["temperature_c"] = float(temp_node.GetValue())
-            except self._pyspin.SpinnakerException as e:
+            except pyspin.SpinnakerException as e:
                 log.debug("DeviceTemperature read failed: %s", e)
         # Transport/stream statistics live on the TL stream nodemap; node names
         # vary by camera/SDK, so read whichever are present.
         try:
-            snm = self._cam.GetTLStreamNodeMap()
+            snm = cam.GetTLStreamNodeMap()
             for name in ("StreamLostFrameCount", "StreamDroppedFrameCount",
                          "StreamIncompleteFrameCount", "StreamFailedBufferCount"):
                 val = self._read_int_node(snm, name)
                 if val is not None:
                     health[name] = val
-        except self._pyspin.SpinnakerException as e:
+        except pyspin.SpinnakerException as e:
             log.debug("Stream statistics read failed: %s", e)
         # Live acquisition settings (tuning feedback for the GUI).
         for key, node_name in (("exposure_us", "ExposureTime"),
                                ("gain_db", "Gain"),
                                ("fps", "AcquisitionFrameRate")):
-            node = getattr(self._cam, node_name, None)
+            node = getattr(cam, node_name, None)
             if node is None:
                 continue
             try:
                 health[key] = float(node.GetValue())
-            except self._pyspin.SpinnakerException as e:
+            except pyspin.SpinnakerException as e:
                 log.debug("%s read failed: %s", node_name, e)
         return health
 

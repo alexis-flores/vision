@@ -92,7 +92,6 @@ def main(argv=None) -> int:
         report = run_acceptance(svc, cam, _criteria(args))
     except Exception as e:  # setup/connect failure is itself a failed acceptance
         log.error("Acceptance run failed before evaluation: %s", e)
-        svc.shutdown()
         return 1
     finally:
         svc.shutdown()

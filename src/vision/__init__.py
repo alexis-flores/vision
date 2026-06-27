@@ -4,7 +4,7 @@ vision — camera backend & frame-serving layer (SRS v0.2 implementation).
 Scope (SRS v0.2): this package is the *vision system* — it configures the
 camera, establishes a real-time stream, and serves frames to two consumers:
 the cueing system (via a CircularFrameBuffer) and the GUI (via a FIFOFrameBuffer
-+ PyQt signal). Image processing / centroid extraction / tracking moved to the
+that a QTimer polls on demand). Image processing / centroid extraction / tracking moved to the
 downstream cueing system; `CueingSystem` here is a thin frame-consumer stand-in
 for that subsystem (see cueing_system.py).
 

@@ -115,6 +115,8 @@ class FrameStat:
     ndim: int
     channels: int
     dtype: str
+    width: int = 0
+    height: int = 0
     device_frame_id: Optional[int] = None  # GenICam chunk frame counter
 
 
@@ -151,7 +153,8 @@ class _Collector:
         self.frames.append(FrameStat(
             host_ts=frame.timestamp, hw_ts=frame.hw_timestamp_ns,
             frame_id=frame.frame_id, ndim=d.ndim, channels=ch,
-            dtype=str(d.dtype), device_frame_id=frame.device_frame_id))
+            dtype=str(d.dtype), width=d.shape[1], height=d.shape[0],
+            device_frame_id=frame.device_frame_id))
         if (self._n % self._sample_every == 0
                 and len(self.samples) < self._max_samples):
             self.samples.append(np.array(d, copy=True))
@@ -261,7 +264,7 @@ def evaluate(m: Metrics, criteria: AcceptanceCriteria) -> AcceptanceReport:
     # 2. Resolution (NFR-003) + matches configured
     want = criteria.expect_resolution or m.cfg_resolution
     # frame is (h, w[, c]); compare (w, h)
-    fw, fh = _frame_wh(m.samples, m.frames)
+    fw, fh = _frame_wh(m.frames)
     res_ok = (min(fw, fh) >= criteria.min_resolution
               and (fw, fh) == want)
     add(CheckResult("resolution", res_ok,
@@ -395,11 +398,12 @@ def _drop_rate(m: Metrics, hw: List[int], dids: List[int],
     return (None, "n/a (no device counter or timestamps)", True)
 
 
-def _frame_wh(samples: List[np.ndarray],
-              frames: List[FrameStat]) -> Tuple[int, int]:
-    if samples:
-        s = samples[-1]
-        return int(s.shape[1]), int(s.shape[0])  # (w, h)
+def _frame_wh(frames: List[FrameStat]) -> Tuple[int, int]:
+    """(width, height) of the most recent frame. Uses per-frame stats — recorded
+    for every frame — so resolution never depends on whether image samples were
+    kept."""
+    if frames:
+        return frames[-1].width, frames[-1].height
     return (0, 0)
 
 

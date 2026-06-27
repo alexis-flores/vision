@@ -39,7 +39,8 @@ def healthy_metrics(n=120, fps=60.0, w=640, h=640, color=True, hw=True,
             host_ts=base + i * period,
             hw_ts=(hw0 + int(i * period * 1e9)) if hw else None,
             frame_id=i, ndim=3 if color else 2, channels=3 if color else 1,
-            dtype="uint8", device_frame_id=(i if device_ids else None))
+            dtype="uint8", width=w, height=h,
+            device_frame_id=(i if device_ids else None))
         for i in range(n)]
     shape = (h, w, 3) if color else (h, w)
     samples = [np.full(shape, level, np.uint8) for _ in range(4)]

@@ -93,7 +93,7 @@ python -m unittest discover -s tests && ruff check . && mypy
 python app.py --backend sim                 # live GUI    (needs [gui])
 python app.py --backend sim --headless      # headless + stats
 # real camera (rig):          use the rig-validation skill, or:
-python tests/test_suite.py TestSpinnakerHardware -v          # HW-001 smoke
+python tests/test_hardware.py TestSpinnakerHardware -v       # HW-001 smoke
 python hardware_acceptance.py --serial <SERIAL> --cycles 10  # objective gate
 python app.py --backend spinnaker --serial <SERIAL>          # live view
 ```

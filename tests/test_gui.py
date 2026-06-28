@@ -8,7 +8,6 @@ not installed (it's the optional `gui` extra).
 from __future__ import annotations
 
 import os
-import sys
 import time
 import unittest
 
@@ -16,9 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # render with no display
 
 import numpy as np
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
-sys.path.insert(0, os.path.join(_ROOT, "src"))
+import _helpers  # noqa: F401  (path bootstrap)
 
 from vision.camera_types import CameraFrame
 from vision.frame_buffers import FIFOFrameBuffer

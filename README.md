@@ -77,10 +77,7 @@ After `pip install -e .` the library is importable as, e.g.,
 | `gui_bridge.py` | PyQt viewer **module** (`CameraViewer`), driver-agnostic; reused by `app.py` | FR-004, NFR-011, 5.4 |
 | `app.py` | Single runner — any backend (sim/opencv/spinnaker), GUI or headless | — |
 | `hardware_acceptance.py` | Acceptance/qualification CLI for a real camera (exit 0/1) | 7 (qualification) |
-| `tests/test_suite.py` | Unit/integration/failure tests | NFR-010, 7 |
-| `tests/test_drivers_mocked.py` | Spinnaker/OpenCV driver logic via fake SDKs | NFR-009, NFR-005 |
-| `tests/test_properties.py` | Property-based frame-buffer invariants (Hypothesis) | NFR-010 |
-| `tests/test_acceptance.py` | Acceptance check-matrix tests (pure + simulator) | NFR-010 |
+| `tests/` | Test suite — one file per concern (config, frame_buffers, generic_driver, camera_service, lens, app, acceptance, gui, drivers_mocked, hardware); shared scaffolding in `_helpers.py` | NFR-010, 7 |
 | `config/camera.json` | Example BlackFly config | FR-001 |
 | `config/bfs_u3_16s2c.json` | BFS-U3-16S2C-CS color config (BayerRG8 → BGR8) | FR-001 |
 | `pyproject.toml` | Package metadata, dependencies + optional-dependency extras | — |
@@ -226,9 +223,10 @@ python hardware_acceptance.py --mono --no-hw-timestamp        # mono / no device
 ### Tests
 
 Pure stdlib `unittest` (no dependency); `pytest` also works after `pip install -e
-".[dev]"`. `tests/test_properties.py` needs Hypothesis (`[dev]`) and skips
-cleanly without it; `TestSpinnakerHardware` skips unless PySpin + a camera are
-present.
+".[dev]"`. Tests are organized one file per concern, with shared scaffolding in
+`tests/_helpers.py`. The property tests (in `test_frame_buffers.py`) need
+Hypothesis (`[dev]`) and skip cleanly without it; `test_hardware.py` skips unless
+PySpin (real-SDK tests) and a camera (HW-001) are present.
 
 ```bash
 python -m unittest discover -s tests             # run everything
@@ -237,23 +235,29 @@ python -m unittest discover -s tests -v          # verbose
 # one file:
 python -m unittest tests.test_acceptance
 # one class / one method:
-python -m unittest tests.test_suite.TestCameraService
-python -m unittest tests.test_suite.TestCameraService.test_malformed_skip
+python -m unittest tests.test_camera_service.TestCameraService
+python -m unittest tests.test_camera_service.TestCameraService.test_malformed_skip
 
 # run the real-hardware smoke test on the rig (must say "Ran 1 test", not skipped):
-python tests/test_suite.py TestSpinnakerHardware -v
+python tests/test_hardware.py TestSpinnakerHardware -v
 
 # pytest equivalents (needs [dev]):
 pytest                                            # all
-pytest tests/test_suite.py::TestCameraService::test_malformed_skip
+pytest tests/test_camera_service.py::TestCameraService::test_malformed_skip
 ```
 
 | Test file | What it covers | Needs |
 |---|---|---|
-| `tests/test_suite.py` | config, driver lifecycle, frame buffers, service (reconnect/skip), cueing handoff, lens math, script imports, HW-001 smoke | core |
-| `tests/test_drivers_mocked.py` | Spinnaker/OpenCV driver logic via fake SDKs (chunk data, temperature, serial selection, teardown) | core |
-| `tests/test_properties.py` | property-based frame-buffer invariants | `[dev]` (Hypothesis) |
-| `tests/test_acceptance.py` | acceptance check matrix (pure) + simulator + connect cycles | core |
+| `tests/test_config.py` | config ingestion (FR-001) + NFR validation | core |
+| `tests/test_frame_buffers.py` | circular/FIFO buffers: example + concurrency + property-based | core (`[dev]` for the property tests) |
+| `tests/test_generic_driver.py` | simulator driver lifecycle, fault injection, frame immutability | core |
+| `tests/test_camera_service.py` | service streaming/reconnect/skip/multi-cam + cueing→GUI handoff | core |
+| `tests/test_lens.py` | lens/FOV math (NFR-004) | core |
+| `tests/test_app.py` | runner + acceptance-CLI arg parsing, multi-camera, clean exit | core |
+| `tests/test_acceptance.py` | acceptance check matrix (pure) + simulator + cycle/stress | core |
+| `tests/test_drivers_mocked.py` | Spinnaker/OpenCV driver logic via fake SDKs | core |
+| `tests/test_gui.py` | offscreen PyQt viewer | `[gui]` (PyQt6) |
+| `tests/test_hardware.py` | real-SDK tests (no camera) + HW-001 smoke (camera) | PySpin / camera |
 
 ### Coverage & static checks (with `[dev]`)
 ```bash
@@ -507,7 +511,7 @@ python -m unittest discover -s tests      # HW-001 skips -> "OK (skipped=1)"
 **Phase 4 — hardware smoke test (now runs instead of skipping).**
 
 ```bash
-python tests/test_suite.py TestSpinnakerHardware -v
+python tests/test_hardware.py TestSpinnakerHardware -v
 ```
 
 Proves the BayerRG8→BGR8 capture path: full-res 1440×1080, 3-channel BGR8,
@@ -615,7 +619,7 @@ cycle test run against the simulator.
 ### Recommended rig validation sequence
 ```bash
 # 1. plumbing go/no-go (must say "Ran 1 test", not skipped):
-python tests/test_suite.py TestSpinnakerHardware -v
+python tests/test_hardware.py TestSpinnakerHardware -v
 # 2. objective acceptance gate (exit 0 = pass):
 python hardware_acceptance.py --serial <SERIAL> --seconds 30 --cycles 10
 # 3. image quality (focus / exposure / true colour) — eyeball:

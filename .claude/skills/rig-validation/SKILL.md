@@ -15,7 +15,7 @@ python -c "import PySpin; s=PySpin.System.GetInstance(); c=s.GetCameras(); print
 
 ## Step 1 — plumbing go/no-go (HW-001)
 ```bash
-python tests/test_suite.py TestSpinnakerHardware -v
+python tests/test_hardware.py TestSpinnakerHardware -v
 ```
 MUST say **"Ran 1 test"**, not "skipped". Proves BayerRG8→BGR8 capture: full-res
 1440×1080, 3-channel BGR8 uint8, a hardware timestamp. If it skips, PySpin/camera

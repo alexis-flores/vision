@@ -11,15 +11,11 @@ Two layers:
 
 from __future__ import annotations
 
-import os
-import sys
 import unittest
 
 import numpy as np
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
-sys.path.insert(0, os.path.join(_ROOT, "src"))
+import _helpers  # noqa: F401  (path bootstrap)
 
 from vision.acceptance import (AcceptanceCriteria, FrameStat, Metrics,
                                evaluate, run_acceptance, run_bandwidth_stress,

@@ -35,9 +35,12 @@ python -m build && twine check dist/*        # packaging sanity (ships py.typed)
   never raises, single-writer GIL-safe counters, daemon threads with bounded joins).
 - Keep changes **opt-in / default-preserving** — never regress the hardware-validated
   single-camera path (CLAUDE.md).
-- Add/extend tests for any behavior change: pure-logic in `tests/test_suite.py` or
-  `tests/test_acceptance.py`; driver logic via the fake SDKs in
-  `tests/test_drivers_mocked.py` (extend the fake `Camera`/`cv2` rather than mocking ad hoc).
+- Add/extend tests for any behavior change, in the concern-matched file (one file
+  per source module: `test_config`, `test_frame_buffers`, `test_generic_driver`,
+  `test_camera_service`, `test_lens`, `test_app`, `test_acceptance`, `test_gui`,
+  `test_hardware`); driver logic via the fake SDKs in `tests/test_drivers_mocked.py`
+  (extend the fake `Camera`/`cv2` rather than mocking ad hoc). Shared fixtures and the
+  path bootstrap live in `tests/_helpers.py` — `import _helpers` first in new files.
 - mypy is configured over `src/vision` + the three root scripts (`pyproject.toml`).
 - Re-run this gate after every change. Commit/push only when asked; sole author
   Alexis, no Claude/Co-Authored-By/Claude-Session trailers.

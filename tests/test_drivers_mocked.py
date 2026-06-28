@@ -8,7 +8,6 @@ ROI-offset reset, and the timeout-vs-fault error classification (NFR-005).
 
 from __future__ import annotations
 
-import os
 import sys
 import types
 import unittest
@@ -16,9 +15,7 @@ from unittest import mock
 
 import numpy as np
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
-sys.path.insert(0, os.path.join(_ROOT, "src"))
+import _helpers  # noqa: F401  (path bootstrap)
 
 from vision.camera_driver import (CameraError, CameraTimeoutError,
                                   MalformedFrameError)

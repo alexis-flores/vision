@@ -1,16 +1,15 @@
 """
-tests/test_spinnaker_realsdk.py
-Real-SDK audit for spinnaker_driver.py — runs against the ACTUALLY INSTALLED
-PySpin/Spinnaker, with NO camera. Complements test_drivers_mocked.py (which
-fakes every PySpin symbol and so cannot catch SDK-version drift) and the
-no-camera symbol audit (scripts/check_pyspin_symbols.py, which only checks that
-symbols exist). Here we drive the real API: host debayer through the driver's
-own _convert(), the real System.GetInstance/ReleaseInstance lifecycle on the
-no-camera path, the real pixel-format / timeout constants, and the SDK-4.x
-ImagePtr.Convert removal that broke the legacy conversion fallback.
+tests/test_hardware.py
+The real-device tier for the BFS-U3-16S2C-CS over Spinnaker. Two layers, each
+skipping cleanly so the software gate stays green on a dev machine:
 
-Skips cleanly where PySpin is absent (e.g. the dev venv), so it is a no-op in the
-software gate and only does real work on a machine with the SDK installed.
+  * TestSpinnakerRealSDK  — drives the ACTUALLY INSTALLED PySpin with NO camera
+    (real host debayer through _convert, the real System lifecycle, real pixel
+    -format/timeout constants, the SDK-4.x ImagePtr.Convert removal). Skips when
+    PySpin is absent. Complements the symbol audit (scripts/check_pyspin_symbols.py)
+    and the fully-mocked tests/test_drivers_mocked.py.
+  * TestSpinnakerHardware — HW-001 smoke against a PHYSICAL camera (BayerRG8 ->
+    BGR8 full-res color capture). Skips when no camera is present.
 
 NOTE: PySpin's Image.Create(w,h,ox,oy,fmt,pData) REFERENCES the buffer; it does
 not copy. The backing ndarray must outlive the Image or the SDK double-frees at
@@ -20,14 +19,12 @@ teardown. We therefore keep every backing array alive on the instance.
 from __future__ import annotations
 
 import os
-import sys
 import unittest
 
 import numpy as np
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
-sys.path.insert(0, os.path.join(_ROOT, "src"))
+import _helpers  # noqa: F401  (path bootstrap)
+from _helpers import CONFIG_DIR
 
 try:
     import PySpin  # type: ignore
@@ -38,8 +35,13 @@ except Exception:  # ImportError, or a numpy-ABI mismatch on import
 from vision.camera_driver import CameraError
 from vision.camera_types import (CameraConfig, CameraFeature, CameraStatus,
                                  PixelFormat)
+from vision.config_loader import load_camera_config
 from vision.spinnaker_driver import SpinnakerCameraDriver
 
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Real installed SDK, NO camera
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
 
 @unittest.skipUnless(_HAVE_PYSPIN, "PySpin/Spinnaker SDK not installed")
 class TestSpinnakerRealSDK(unittest.TestCase):
@@ -164,6 +166,84 @@ class TestSpinnakerRealSDK(unittest.TestCase):
             drv.connect()
         drv.disconnect()
         self.assertEqual(drv.get_status(), CameraStatus.DISCONNECTED)
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Real PHYSICAL camera (HW-001)
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+def _spinnaker_camera_present() -> bool:
+    try:
+        import PySpin
+    except Exception:
+        return False
+    system = None
+    try:
+        system = PySpin.System.GetInstance()
+        cams = system.GetCameras()
+        n = cams.GetSize()
+        cams.Clear()
+        return n > 0
+    except Exception:
+        return False
+    finally:
+        if system is not None:
+            try:
+                system.ReleaseInstance()
+            except Exception:
+                pass
+
+
+@unittest.skipUnless(_spinnaker_camera_present(),
+                     "PySpin + a physical BlackFly S camera not present")
+class TestSpinnakerHardware(unittest.TestCase):  # HW-001 (real device)
+    def test_color_bgr_capture(self):
+        cfg_path = os.path.join(CONFIG_DIR, "bfs_u3_16s2c.json")
+        cfg = load_camera_config(cfg_path)
+        drv = SpinnakerCameraDriver(cfg)
+        # connect() failing here -> SDK/permissions/camera not found:
+        #   check spinview, the flirimaging group/udev, and Phase 0/1 of the
+        #   bring-up section in the README.
+        drv.connect()
+        try:
+            self.assertEqual(
+                drv.get_status(), CameraStatus.CONNECTED,
+                "connect() did not reach CONNECTED — camera opened but init "
+                "failed; check the serial/device_index in the config.")
+            drv.start_stream()
+            frame = drv.read_frame(timeout=2.0)
+
+            # Color camera must yield a 3-channel BGR8 frame at full res.
+            self.assertEqual(
+                frame.data.ndim, 3,
+                f"Got a {frame.data.ndim}-D frame; expected 3-D color. The "
+                "camera isn't debayering to BGR — check 'output_pixel_format' "
+                "(BGR8) and 'device_pixel_format' (BayerRG8) in the config, and "
+                "that ImageProcessor/Convert ran (see spinnaker_driver._convert).")
+            self.assertEqual(
+                frame.data.shape[2], 3,
+                f"Got {frame.data.shape[2]} channels; expected 3 (BGR). "
+                "Pixel-format conversion produced the wrong layout — verify "
+                "'output_pixel_format': 'BGR8' in the config.")
+            self.assertEqual(
+                (frame.data.shape[1], frame.data.shape[0]), tuple(cfg.resolution),
+                f"Frame {frame.data.shape[1]}x{frame.data.shape[0]} != configured "
+                f"{tuple(cfg.resolution)}. Width/Height weren't applied (a saved "
+                "user set, binning, or ROI offset may differ) — check "
+                "'resolution' and that RESOLUTION is in 'features'.")
+            self.assertEqual(
+                frame.data.dtype, np.uint8,
+                f"Frame dtype {frame.data.dtype} != uint8. Conversion target is "
+                "wrong — use an 8-bit 'output_pixel_format' (BGR8/Mono8), not a "
+                "16-bit format, for the 8-bit pipeline.")
+            self.assertIsNotNone(
+                frame.hw_timestamp_ns,
+                "No hardware timestamp — GetTimeStamp() returned nothing; the "
+                "driver couldn't read the device clock (check Spinnaker/PySpin "
+                "version compatibility).")
+            drv.stop_stream()
+        finally:
+            drv.disconnect()
 
 
 if __name__ == "__main__":

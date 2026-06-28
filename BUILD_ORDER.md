@@ -250,11 +250,14 @@ has **no runtime dependency** on the rest.
 ## Phase 9 — Tests + packaging (ideally write tests *as you go*)
 
 ### 14. `tests/`
-The best way to learn is to write each test right after its module: config load,
-driver lifecycle + feature gating (`test_suite.py`), the real-hardware driver
-logic via fake PySpin/cv2 (`test_drivers_mocked.py`), frame-buffer invariants
-(`test_properties.py`), the service malformed-skip/reconnect, the vision→cueing
-handoff, the lens math, and the hardware smoke test that skips without a camera.
+The best way to learn is to write each test right after its module, one file per
+concern: config load (`test_config.py`), driver lifecycle + feature gating
+(`test_generic_driver.py`), the real-hardware driver logic via fake PySpin/cv2
+(`test_drivers_mocked.py`), frame-buffer invariants incl. property-based
+(`test_frame_buffers.py`), the service malformed-skip/reconnect + vision→cueing
+handoff (`test_camera_service.py`), the lens math (`test_lens.py`), and the
+real-SDK + hardware-smoke tier that skips without PySpin/a camera
+(`test_hardware.py`). Shared fixtures + the path bootstrap live in `tests/_helpers.py`.
 
 ### 15. Finish `pyproject.toml`
 Dependencies + optional-dependency extras (`gui`, `yaml`, `dev`, `all`) — the

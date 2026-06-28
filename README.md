@@ -375,6 +375,13 @@ What to set / tune for your rig:
   over USB3.
 - **Leave** `device_pixel_format: BayerRG8` + `output_pixel_format: BGR8` as-is —
   that pair is the color debayer setup (camera sends raw Bayer; host debayers).
+- **`timestamp_sync`** *(opt-in, default `false`)* — when `true`, the driver
+  latches the device clock against the host once at connect
+  (`TimestampLatch`/`TimestampLatchValue`) and tags each frame's
+  `metadata["host_capture_time_s"]` on the host monotonic timebase, for
+  correlating frames to host events / other cameras. Leave `false` for a single
+  camera whose consumer only needs frame order/freshness (device `hw_timestamp_ns`
+  is still always present).
 
 The **C-to-CS adapter** is a physical part — see the optics note above.
 
@@ -552,6 +559,10 @@ python hardware_acceptance.py --serial 21512345                 # 20s, NFR defau
 python hardware_acceptance.py --serial 21512345 --seconds 30 --min-fps 60
 python hardware_acceptance.py --serial 21512345 --cycles 10     # + teardown-churn test
 python hardware_acceptance.py --mono --no-hw-timestamp          # mono / no device clock
+# stress / endurance (opt-in; all default off):
+python hardware_acceptance.py --serial 21512345 --seconds 3600           # 1-hour soak (--seconds IS the soak knob)
+python hardware_acceptance.py --serial 21512345 --stress-reconnect 5     # automated mid-stream interrupt/recover (NFR-005)
+python hardware_acceptance.py --serial 21512345 --stress-bandwidth 40000000  # squeeze the bus; verify drops detected & bounded
 ```
 
 **Checks (PASS/FAIL):** streaming reached · frames received · resolution
@@ -563,6 +574,21 @@ saturated) · stream stability (no reconnects during the run). With `--cycles N`
 it also runs N connect→stream→teardown cycles to validate clean release (the
 `gc.collect`/`atexit` teardown path) — the automated counterpart to a manual
 unplug/replug.
+
+**Stress / endurance (opt-in, all default off).** `--seconds` doubles as the
+**soak** knob (e.g. `--seconds 3600` for a 1-hour run). `--stress-reconnect N`
+adds N automated mid-stream interrupt/recover cycles, asserting frames resume
+each time — the automated counterpart to a manual unplug for the *re-acquire*
+path (the true physical-unplug `_lost` path stays a manual step, see Phase 7).
+`--stress-bandwidth BPS` squeezes `DeviceLinkThroughputLimit` to starve the bus
+and verifies the pipeline degrades **gracefully** — still streaming, stable, and
+any dropped/incomplete frames detected and within bounds. The squeeze is a live
+register (non-persisted); the original config value is restored afterwards.
+
+**Readable failure diagnostics.** On an incomplete frame the driver logs the
+camera's own status *description* (e.g. *"Image data is incomplete … missing
+packet(s)"*) instead of a bare status code — pointing straight at the usual cause
+(USB3 bandwidth; see Phase 0 `usbfs_memory_mb`).
 
 **Authoritative drop detection (GenICam chunk data).** The Spinnaker driver
 enables chunk data so each frame carries the camera's own **device frame
@@ -595,6 +621,11 @@ python hardware_acceptance.py --serial <SERIAL> --seconds 30 --cycles 10
 # 3. image quality (focus / exposure / true colour) — eyeball:
 python app.py --backend spinnaker --serial <SERIAL>
 # 4. reconnect (NFR-005) — unplug/replug the USB during step 2 or 3.
+# 5. Phase 7 — stress / endurance (optional): soak + automated recovery + bus squeeze
+python hardware_acceptance.py --serial <SERIAL> --seconds 3600 \
+    --stress-reconnect 5 --stress-bandwidth 40000000
+#    then one manual unplug/replug to exercise the true hot-unplug (_lost) path,
+#    which automation can't safely reproduce.
 ```
 
 ## Requirements traceability (SRS v0.2 §7)

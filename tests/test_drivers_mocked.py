@@ -99,9 +99,11 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
         def GetValue(self): return 5
 
     class CEnum:
+        def __init__(self): self.v = 0
         def GetEntryByName(self, name): return EnumEntry()
         def SetIntValue(self, v): self.v = v
-        def GetValue(self): return 0           # int-node read (stream stats)
+        def SetValue(self, v): self.v = v      # CIntegerPtr int-node writes
+        def GetValue(self): return self.v      # 0 by default (stream stats)
 
     PySpin.CEnumerationPtr = lambda node: node
     PySpin.CIntegerPtr = lambda node: node
@@ -109,8 +111,9 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
     PySpin.IsWritable = lambda n: True
     PySpin.IsReadable = lambda n: True
 
-    class StreamNodeMap:
-        def GetNode(self, name): return CEnum()
+    class StreamNodeMap:                        # cache nodes so writes persist
+        def __init__(self): self._nodes = {}
+        def GetNode(self, name): return self._nodes.setdefault(name, CEnum())
 
     class Camera:
         def __init__(self):
@@ -142,7 +145,10 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
         def BeginAcquisition(self): self.acquiring = True
         def EndAcquisition(self):
             self.acquiring = False; self.endacq_calls += 1
-        def GetTLStreamNodeMap(self): return StreamNodeMap()
+        def GetTLStreamNodeMap(self):
+            if not hasattr(self, "_snm"):
+                self._snm = StreamNodeMap()
+            return self._snm
         def GetNextImage(self, timeout):
             if getnext_errorcode is not None:
                 raise SpinnakerException("injected GetNextImage error",
@@ -214,6 +220,22 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         self.assertEqual(fake._cam.OffsetY.GetValue(), 0)
         self.assertEqual(fake._cam.Width.GetValue(), 1440)
         self.assertEqual(fake._cam.Height.GetValue(), 1080)
+
+    def test_stream_buffer_count_opt_in(self):
+        # Default (None) leaves the SDK default; a set value is applied at
+        # start_stream via StreamBufferCountManual.
+        fake, drv = self._install()
+        snm = fake._cam.GetTLStreamNodeMap()
+        drv.connect(); drv.start_stream()
+        self.assertEqual(snm.GetNode("StreamBufferCountManual").GetValue(), 0)
+        drv.stop_stream(); drv.disconnect()
+
+        fake2, drv2 = self._install()
+        drv2.config.stream_buffer_count = 20
+        snm2 = fake2._cam.GetTLStreamNodeMap()
+        drv2.connect(); drv2.start_stream()
+        self.assertEqual(snm2.GetNode("StreamBufferCountManual").GetValue(), 20)
+        drv2.stop_stream(); drv2.disconnect()
 
     def test_reset_to_defaults(self):
         fake, drv = self._install()

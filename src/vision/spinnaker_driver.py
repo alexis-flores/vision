@@ -422,6 +422,24 @@ class SpinnakerCameraDriver(CameraDriver):
         except PySpin.SpinnakerException as e:
             log.warning("Could not set StreamBufferHandlingMode=NewestOnly: %s",
                         e)
+        # Optional manual stream-buffer pool size (default: leave the SDK default,
+        # so the validated baseline is unchanged unless a config opts in).
+        if self.config.stream_buffer_count:
+            try:
+                snm = self._cam.GetTLStreamNodeMap()
+                cmode = PySpin.CEnumerationPtr(
+                    snm.GetNode("StreamBufferCountMode"))
+                if PySpin.IsAvailable(cmode) and PySpin.IsWritable(cmode):
+                    entry = cmode.GetEntryByName("Manual")
+                    if PySpin.IsAvailable(entry) and PySpin.IsReadable(entry):
+                        cmode.SetIntValue(entry.GetValue())
+                count = PySpin.CIntegerPtr(snm.GetNode("StreamBufferCountManual"))
+                if PySpin.IsAvailable(count) and PySpin.IsWritable(count):
+                    count.SetValue(int(self.config.stream_buffer_count))
+                    log.info("Stream buffer count set to %d",
+                             self.config.stream_buffer_count)
+            except PySpin.SpinnakerException as e:
+                log.warning("Could not set stream buffer count: %s", e)
         self._enable_chunk_data()
 
     def _enable_chunk_data(self) -> None:

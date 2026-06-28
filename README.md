@@ -178,6 +178,7 @@ apply only to a single-camera setup; with a multi-camera config they're ignored
 | `--inject-faults` | off | sim only: inject malformed frames + a crash to demo NFR-006/NFR-005 |
 | `--no-cueing` | off | don't start the cueing consumer; serve frames to the GUI only (display-only acquisition) |
 | `--reset` | off | spinnaker only: load the factory Default user set, set it as the power-on default, then exit |
+| `--rt` | off | real-time mode: freeze + disable GC during the run and raise the camera worker(s) to `SCHED_FIFO` (Linux, needs root) for low-jitter frame timing |
 
 The cueing consumer and the GUI are **independent fan-out branches**, so
 `--no-cueing` gives you a pure live-view (`service → FIFO → CameraViewer`) with no
@@ -377,13 +378,12 @@ What to set / tune for your rig:
 
 The **C-to-CS adapter** is a physical part — see the optics note above.
 
-### Scaling to a multi-camera rig (considerations — not yet implemented)
+### Scaling to a multi-camera rig & low-jitter tuning
 
-The runner already drives **N cameras concurrently** (each on its own worker
-thread + fan-out), but a production multi-camera rig usually needs three things
-the driver doesn't do yet. They're deliberately deferred (YAGNI for a single
-free-running camera) and **none affect single-camera operation** — they're
-opt-in, off by default. Add them when you actually build the rig.
+The runner drives **N cameras concurrently** (each on its own worker thread +
+fan-out). A production rig wants a few extra knobs — some are now **built in**
+(opt-in, off by default, so single-camera operation is unchanged), the rest are
+deferred or are system-level config:
 
 - **Hardware trigger / shutter sync.** Today every camera **free-runs**
   (`TriggerMode` defaults Off; the `TRIGGER` feature in `camera_types.py` is
@@ -408,13 +408,21 @@ opt-in, off by default. Add them when you actually build the rig.
   extending `_ATTR_MAP` (with auto-mode-off handling where needed, as exposure/
   gain already do) is the additive path — no change to the validated frame path.
 
-- **Stream buffer count.** The driver uses the SDK's **default** buffer count
-  with `StreamBufferHandlingMode=NewestOnly`. With **multiple cameras sharing one
-  USB3 controller or PCIe lane**, transient bandwidth contention can drop frames
-  if the per-camera buffer pool is too small. Tuning `StreamBufferCountMode=Manual`
-  + `StreamBufferCountManual` (a few extra buffers per camera) absorbs bursts;
-  size it by watching `StreamLostFrameCount`/`StreamDroppedFrameCount` (already in
-  `get_health()`). A single camera at 60 fps doesn't need this — 0 drops observed.
+- **Stream buffer count — built in.** Set **`stream_buffer_count`** in the config
+  (the driver applies `StreamBufferCountMode=Manual` + `StreamBufferCountManual`);
+  leave it unset for the SDK default. With **multiple cameras sharing one USB3
+  controller or PCIe lane**, bandwidth contention can drop frames if the pool is
+  too small — raise it and watch `StreamLostFrameCount`/`StreamDroppedFrameCount`
+  (in `get_health()`). A single camera at 60 fps doesn't need it (0 drops
+  observed), so the default is unchanged.
+
+- **Low-jitter / real-time timing — built in (`--rt`) + OS tuning.** `--rt`
+  freezes + disables Python's GC during the run and raises the camera worker(s)
+  to `SCHED_FIFO` (Linux, needs root) to cut frame-time jitter. For the tightest
+  latency, add **OS-level rig config** (not code, host-specific): pin the worker
+  to an isolated core (`isolcpus` + affinity), set the CPU governor to
+  `performance`, move USB3 IRQs off that core, and `mlockall`. Validate the
+  effect with `hardware_acceptance.py`'s `interframe_jitter` check.
 
 ### First-time hardware bring-up (Ubuntu 22.04)
 

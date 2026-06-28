@@ -107,7 +107,7 @@ class AcceptanceReport:
 #   Metrics collection
 # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
 
-@dataclass
+@dataclass(slots=True)   # per-frame, accumulated for the whole run -> save memory
 class FrameStat:
     host_ts: float
     hw_ts: Optional[int]

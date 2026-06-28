@@ -7,7 +7,11 @@ name = "vision-system"
 version = "2.0.0"
 description = "Real-time camera backend and frame-serving pipeline (SRS v0.2 implementation)"
 readme = "README.md"
-requires-python = ">=3.9"
+# Floor is 3.10: the Spinnaker/PySpin wheels for the BFS-U3-16S2C cap at CPython
+# 3.10, so the real-hardware path runs on 3.10. No upper cap — the sim / tests /
+# dev tooling run fine on newer CPython (the spinnaker backend just isn't usable
+# there, which surfaces as a clean "PySpin not installed").
+requires-python = ">=3.10"
 license = { text = "Proprietary" }
 
 # Core runtime: camera abstraction, service layer, frame buffers, and the
@@ -64,5 +68,5 @@ extend-exclude = ["Spinnaker", "Spinnaker-Examples-main"]
 "tests/**" = ["E402", "E702"]
 
 [tool.mypy]
-files = ["src/vision"]
-ignore_missing_imports = true   # PySpin / cv2 / cupy / PyQt6 ship no stubs
+files = ["src/vision", "app.py", "gui_bridge.py", "hardware_acceptance.py"]
+ignore_missing_imports = true   # PySpin / cv2 / cupy ship no stubs

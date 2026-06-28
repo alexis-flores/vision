@@ -339,6 +339,21 @@ class TestCameraService(unittest.TestCase):
         self.assertEqual(svc.get_status("camA"), CameraStatus.DISCONNECTED)
         self.assertEqual(svc.get_status("camB"), CameraStatus.DISCONNECTED)
 
+    def test_rt_mode_streams_or_degrades(self):  # opt-in SCHED_FIFO, best-effort
+        # RT mode requests real-time priority on the worker; where it isn't
+        # supported / privileged it logs and still streams normally.
+        svc = CameraService(rt=True)
+        svc.add_camera("rt", GenericCameraDriver(basic_config("rt"), n_spots=3))
+        svc.attach_sink("rt", CircularFrameBuffer(16))
+        svc.connect("rt")
+        svc.start_streaming("rt")
+        try:
+            _wait_until(lambda: svc.stats("rt")["frames_delivered"] > 0,
+                        timeout=3.0)
+            self.assertGreater(svc.stats("rt")["frames_delivered"], 0)
+        finally:
+            svc.shutdown()
+
     def test_stop_streaming_idempotent_quiet(self):  # cosmetic double-log fix
         self.svc.connect("svccam")
         self.svc.start_streaming("svccam")
@@ -502,6 +517,8 @@ class TestScriptsImport(unittest.TestCase):
         self.assertEqual(ns3.fps, 30.0)
         self.assertFalse(ns.reset)                             # default: no reset
         self.assertTrue(app._parse_args(["--reset"]).reset)
+        self.assertFalse(ns.rt)                                # default: no rt mode
+        self.assertTrue(app._parse_args(["--rt"]).rt)
 
     def test_main_clean_exit_on_operational_error(self):
         # An expected backend failure (e.g. SDK missing / no camera) must exit

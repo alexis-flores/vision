@@ -8,6 +8,7 @@ number of registered sinks (circular buffer -> vision, FIFO -> GUI, ...).
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -18,6 +19,23 @@ from .camera_types import CameraFrame, CameraStatus
 from .frame_buffers import FrameSink
 
 log = logging.getLogger(__name__)
+
+
+def _apply_rt_scheduling() -> None:
+    """Best-effort: raise the calling (worker) thread to real-time FIFO priority
+    for low scheduling jitter. Linux-only and needs CAP_SYS_NICE (root); on other
+    platforms or without privilege it logs and runs at normal priority — never
+    raises. CPU affinity / governor / isolcpus are system-level rig tuning (see
+    README), not set here, since the right core is host-specific."""
+    if not (hasattr(os, "sched_setscheduler") and hasattr(os, "SCHED_FIFO")):
+        log.info("RT scheduling unsupported on this platform; normal priority")
+        return
+    try:
+        os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(10))
+        log.info("Camera worker raised to SCHED_FIFO(10) for low jitter")
+    except (PermissionError, OSError) as e:
+        log.warning("RT priority unavailable (need CAP_SYS_NICE/root): %s; "
+                    "running at normal priority", e)
 
 
 @dataclass
@@ -59,9 +77,10 @@ class CameraService:
     # the device is back. 0 == retry forever; >0 bounds the attempts.
     MAX_RECONNECT_ATTEMPTS = 60
 
-    def __init__(self) -> None:
+    def __init__(self, rt: bool = False) -> None:
         self._cams: Dict[str, _CameraEntry] = {}
         self._lock = threading.Lock()
+        self._rt = rt   # real-time mode: worker threads request SCHED_FIFO
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Registration
@@ -238,6 +257,8 @@ class CameraService:
                              ERROR and wait; never raise out (NFR-005)
           Shutdown         : stop_evt set -> exit
         """
+        if self._rt:
+            _apply_rt_scheduling()   # best-effort; from within the worker thread
         driver = entry.driver
         while not entry.stop_evt.is_set():
             try:

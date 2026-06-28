@@ -53,10 +53,14 @@ def frame_to_qimage(frame: CameraFrame) -> QImage:
             data = (data >> (data.itemsize * 8 - 8)).astype(np.uint8)
             data = np.ascontiguousarray(data)
         h, w = data.shape
-        return QImage(data.data, w, h, w,
+        # numpy's contiguous buffer (a memoryview) is a valid QImage data arg at
+        # runtime; the PyQt6 stub only types `bytes`. QImage.copy() below deep-
+        # copies, so the buffer can be freed — and we avoid a per-frame bytes()
+        # copy. Hence the targeted call-overload ignore.
+        return QImage(data.data, w, h, w,  # type: ignore[call-overload]
                       QImage.Format.Format_Grayscale8).copy()
     h, w, ch = data.shape  # color, assume BGR
-    return QImage(data.data, w, h, ch * w,
+    return QImage(data.data, w, h, ch * w,  # type: ignore[call-overload]
                   QImage.Format.Format_BGR888).copy()
 
 
@@ -127,7 +131,8 @@ class CameraViewer(QMainWindow):
         self._hud.move(self.HUD_MARGIN, self.HUD_MARGIN)
         self._hud.hide()
 
-        self.setStatusBar(QStatusBar())   # bottom: per-frame + bookkeeping detail
+        self._statusbar = QStatusBar()    # kept as a typed ref (statusBar()->Optional)
+        self.setStatusBar(self._statusbar)  # bottom: per-frame + bookkeeping detail
         self.resize(960, 720)             # sensible 4:3 default
 
         # The timer IS the "ready for next frame" signal (SRS 5.4).
@@ -215,7 +220,7 @@ class CameraViewer(QMainWindow):
                        f"reconnects {self._reconnects}"]
         if self._lost is not None:
             detail.append(f"lost {self._lost}")
-        self.statusBar().showMessage("    ·    ".join(detail))
+        self._statusbar.showMessage("    ·    ".join(detail))
 
     @staticmethod
     def _safe_call(fn: Optional[Callable[[], dict]]) -> dict:

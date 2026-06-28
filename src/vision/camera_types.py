@@ -111,6 +111,10 @@ class CameraConfig:
     #     device.
     device_pixel_format: Optional[str] = None
     output_pixel_format: PixelFormat = PixelFormat.BGR8
+    # Optional stream-buffer pool size (Spinnaker StreamBufferCountManual).
+    # None = SDK default (unchanged). Raise it when multiple cameras sharing a
+    # USB3/PCIe link drop frames under bandwidth contention.
+    stream_buffer_count: Optional[int] = None
 
     def __post_init__(self) -> None:
         self.max_pixel_count = self.max_resolution[0] * self.max_resolution[1]
@@ -160,10 +164,14 @@ class CameraConfig:
 #   Camera frame
 # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
 
-@dataclass
+@dataclass(slots=True)
 class CameraFrame:
     """
     Standard frame container shared across all drivers and consumers.
+
+    slots=True (Python 3.10+): this is the per-frame hot object, so dropping the
+    per-instance __dict__ trims allocation + memory at 60 fps. (Frames are
+    treated as immutable; no code sets dynamic attributes on them.)
     """
     data: np.ndarray # Image data (H, W) or (H, W, C)
     timestamp: float # Host time, time.monotonic()

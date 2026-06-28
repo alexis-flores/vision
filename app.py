@@ -27,12 +27,14 @@ single-camera setup is just the N=1 case (unchanged behavior).
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from functools import partial
+from typing import TYPE_CHECKING, List, Optional, cast
 
 from vision.camera_driver import CameraError
 from vision.camera_service import CameraService
@@ -40,6 +42,9 @@ from vision.camera_types import CameraConfig, CameraFeature
 from vision.config_loader import ConfigError, load_camera_configs
 from vision.cueing_system import CueingSystem
 from vision.frame_buffers import CircularFrameBuffer, FIFOFrameBuffer
+
+if TYPE_CHECKING:  # type-only: the sim fault hooks live on GenericCameraDriver
+    from vision.generic_driver import GenericCameraDriver
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,6 +88,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
                     help="spinnaker only: load the factory Default user set and "
                          "make it the power-on default, then exit (resets the "
                          "camera, including across power-cycles)")
+    ap.add_argument("--rt", action="store_true",
+                    help="real-time mode: freeze + disable GC during the run and "
+                         "raise the camera worker(s) to SCHED_FIFO (Linux, needs "
+                         "root) for low-jitter frame timing")
     return ap.parse_args(argv)
 
 
@@ -137,7 +146,7 @@ def _build_service(args: argparse.Namespace):
     its own worker thread. CLI overrides (--serial/--exposure/--gain/--fps) are
     applied only to a single-camera setup; for a multi-camera config each camera
     keeps its own config values (one --serial cannot bind N physical units)."""
-    svc = CameraService()
+    svc = CameraService(rt=args.rt)
     config = args.config
     if config is None and args.backend == "spinnaker":
         config = DEFAULT_SPINNAKER_CONFIG  # spinnaker needs a real device config
@@ -175,10 +184,12 @@ def _run_gui(runs: List[_CamRun], svc: CameraService, backend: str) -> None:
     app = QApplication(sys.argv)
     viewers = []  # hold refs so the windows aren't garbage-collected
     for r in runs:
-        name = r.name  # bind per-iteration name into the lambda defaults
+        name = r.name
+        # partial binds this camera's name immediately (no late-binding closure)
+        # and is properly typed, unlike a default-arg lambda.
         win = CameraViewer(r.gui_fifo, title=f"{name} ({backend})",
-                           health_fn=lambda n=name: svc.get_health(n),
-                           stats_fn=lambda n=name: svc.stats(n))
+                           health_fn=partial(svc.get_health, name),
+                           stats_fn=partial(svc.stats, name))
         win.show()
         viewers.append(win)
     log.info("Close the window(s) to stop.")
@@ -207,12 +218,14 @@ def _run_headless(args: argparse.Namespace, svc: CameraService,
                 for r in runs:
                     log.info(">>> [%s] Injecting 3 malformed frames (NFR-006)",
                              r.name)
-                    svc._entry(r.name).driver.inject_malformed(3)
+                    cast("GenericCameraDriver",
+                         svc._entry(r.name).driver).inject_malformed(3)
                 time.sleep(0.5)  # let them be skipped before the crash
                 for r in runs:
                     log.info(">>> [%s] Injecting backend crash (NFR-005)",
                              r.name)
-                    svc._entry(r.name).driver.inject_backend_crash()
+                    cast("GenericCameraDriver",
+                         svc._entry(r.name).driver).inject_backend_crash()
     except KeyboardInterrupt:
         log.info("Interrupted; shutting down.")
 
@@ -268,6 +281,11 @@ def main(argv=None) -> int:
         log.warning("--no-cueing with --headless: no consumer attached; "
                     "frames will just be acquired and dropped.")
 
+    if args.rt:
+        gc.freeze()    # move setup objects out of GC's scan set -> cheap sweeps
+        gc.disable()   # no auto collections during the run (manual at teardown)
+        log.info("Real-time mode: GC frozen + disabled; worker(s) -> SCHED_FIFO")
+
     rc = 0
     try:
         for r in runs:
@@ -304,6 +322,9 @@ def main(argv=None) -> int:
                      "reconnects=%d | cueing consumed=%s", r.name,
                      svc.get_status(r.name).name, st["frames_delivered"],
                      st["malformed_frames"], st["reconnects"], consumed)
+        if args.rt:                 # restore + manual sweep now the run is over
+            gc.enable()
+            gc.collect()
     return rc
 
 

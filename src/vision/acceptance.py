@@ -441,3 +441,83 @@ def run_connect_cycles(driver_factory: Callable[[], CameraDriver],
             drv.disconnect()
     return CheckResult("connect_cycles", True,
                        f"{cycles} clean connect/stream/teardown cycles")
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Stress checks (opt-in; verify reliability under adverse conditions)
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+def run_recovery_cycles(driver: CameraDriver, cycles: int = 5,
+                        frames_per_cycle: int = 5,
+                        read_timeout: float = 2.0) -> CheckResult:
+    """Automated NFR-005 recovery stress: stream, tear the stream down MID-FLIGHT
+    (drop the backend handle while STREAMING), then re-acquire by serial and
+    confirm frames RESUME — repeated `cycles` times.
+
+    This is the automated, repeatable counterpart to a manual unplug/replug:
+    it exercises the same re-bind / re-init / resume path the service runs on a
+    backend fault, but on demand. Unlike run_connect_cycles (which stops the
+    stream cleanly each time), this interrupts while streaming.
+
+    Non-destructive and hardware-safe: it only opens and closes the backend
+    handle. It writes nothing to the camera's saved settings, so a power-cycle
+    is unaffected. Works on the simulator and on real hardware alike.
+    """
+    try:
+        driver.connect()
+        driver.start_stream()
+        for _ in range(frames_per_cycle):
+            driver.read_frame(timeout=read_timeout)
+        for i in range(cycles):
+            driver.disconnect()             # interrupt while streaming
+            driver.connect()                # re-bind (by serial) + re-init
+            driver.start_stream()           # resume acquisition
+            for _ in range(frames_per_cycle):
+                driver.read_frame(timeout=read_timeout)   # confirm frames resume
+    except CameraError as e:
+        return CheckResult("reconnect_recovery", False,
+                           f"recovery failed: {e}")
+    finally:
+        try:
+            driver.stop_stream()
+        except CameraError:
+            pass
+        driver.disconnect()
+    return CheckResult(
+        "reconnect_recovery", True,
+        f"{cycles} mid-stream interrupt/recover cycles; frames resumed each time")
+
+
+def run_bandwidth_stress(service: CameraService, name: str,
+                         criteria: AcceptanceCriteria,
+                         limit_bps: int) -> CheckResult:
+    """Re-run an acquisition window under a deliberately low
+    DeviceLinkThroughputLimit to starve the bus, and verify the pipeline
+    DEGRADES GRACEFULLY rather than collapsing: it keeps streaming, stays
+    stable (no backend faults), and any resulting dropped/incomplete frames are
+    DETECTED and within the configured bounds. That proves the drop-detection
+    works and a starved USB3 bus is survivable — the core reliability claim.
+
+    The squeeze is a live-register write (Spinnaker DeviceLinkThroughputLimit),
+    NOT persisted: it reverts on disconnect / power-cycle, and the original
+    config value is restored here too. Backends that ignore the limit (the
+    simulator) simply run the window, which exercises the wiring.
+    """
+    driver = service._entry(name).driver
+    original = getattr(driver.config, "link_throughput_limit_bps", None)
+    driver.config.link_throughput_limit_bps = int(limit_bps)
+    if service.get_status(name) == CameraStatus.DISCONNECTED:
+        service.connect(name)
+    try:
+        m = collect(service, name, criteria)
+    finally:
+        driver.config.link_throughput_limit_bps = original  # restore (non-persisted)
+    rep = evaluate(m, criteria)
+    # Graceful degradation = still streaming + stable + drops detected & bounded.
+    critical = ("frames_received", "stream_stability", "frame_integrity",
+                "dropped_frames")
+    sub = [c for c in rep.checks if c.name in critical]
+    ok = m.streaming_reached and all(c.passed for c in sub if not c.skipped)
+    detail = (f"limit={int(limit_bps)} Bps -> "
+              + "; ".join(f"{c.name}={c.status}" for c in sub))
+    return CheckResult("bandwidth_stress", ok, detail)

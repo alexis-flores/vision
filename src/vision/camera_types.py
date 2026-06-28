@@ -122,6 +122,13 @@ class CameraConfig:
     # starves and drops frames. Lower than what the requested fps needs will
     # reduce the achievable rate. A single camera needs no limit.
     link_throughput_limit_bps: Optional[int] = None
+    # Opt-in device->host clock sync. When True the driver latches the device
+    # timestamp against the host clock once at connect (BFS: TimestampLatch +
+    # TimestampLatchValue) and tags each frame's metadata with
+    # "host_capture_time_s" — the device hw_timestamp_ns expressed on the host
+    # monotonic timebase, so downstream can correlate frames to host events /
+    # other cameras. None/False = unchanged validated path (no latch, no tag).
+    timestamp_sync: bool = False
 
     def __post_init__(self) -> None:
         self.max_pixel_count = self.max_resolution[0] * self.max_resolution[1]

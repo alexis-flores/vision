@@ -27,7 +27,8 @@ import os
 import sys
 
 from vision.acceptance import (AcceptanceCriteria, run_acceptance,
-                               run_connect_cycles)
+                               run_bandwidth_stress, run_connect_cycles,
+                               run_recovery_cycles)
 from vision.camera_service import CameraService
 
 logging.basicConfig(
@@ -61,6 +62,17 @@ def _parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--cycles", type=int, default=0,
                     help="also run N connect/stream/teardown cycles (0 = skip)")
     ap.add_argument("--frames-per-cycle", type=int, default=5)
+    # --- stress mode (opt-in; verify reliability under adverse conditions) ----
+    # Note: --seconds doubles as the soak knob (e.g. --seconds 3600 for a 1h run).
+    ap.add_argument("--stress-reconnect", type=int, default=0, metavar="N",
+                    help="STRESS: N mid-stream interrupt/recover cycles, "
+                         "asserting frames resume each time (automated NFR-005; "
+                         "0 = skip)")
+    ap.add_argument("--stress-bandwidth", type=int, default=None, metavar="BPS",
+                    help="STRESS: re-run the window with DeviceLinkThroughputLimit "
+                         "squeezed to BPS Bytes/s to provoke drops, asserting the "
+                         "pipeline stays stable and drops are detected & bounded "
+                         "(live register, non-persisted; reverts on power-cycle)")
     return ap.parse_args(argv)
 
 
@@ -77,9 +89,16 @@ def _criteria(args: argparse.Namespace) -> AcceptanceCriteria:
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
+    from vision.config_loader import load_camera_config
     from vision.spinnaker_driver import SpinnakerCameraDriver
 
     def make_driver(cfg):
+        if args.serial:
+            cfg.serial = args.serial
+        return SpinnakerCameraDriver(cfg)
+
+    def factory():  # a fresh driver for the cycle / recovery stress tests
+        cfg = load_camera_config(args.config)
         if args.serial:
             cfg.serial = args.serial
         return SpinnakerCameraDriver(cfg)
@@ -90,6 +109,11 @@ def main(argv=None) -> int:
         cam = names[0]
         svc.connect(cam)
         report = run_acceptance(svc, cam, _criteria(args))
+        # Optional STRESS: bandwidth squeeze. Re-uses the connected service
+        # (run_bandwidth_stress reconnects as needed) before we shut it down.
+        if args.stress_bandwidth is not None:
+            report.checks.append(run_bandwidth_stress(
+                svc, cam, _criteria(args), args.stress_bandwidth))
     except Exception as e:  # setup/connect failure is itself a failed acceptance
         log.error("Acceptance run failed before evaluation: %s", e)
         return 1
@@ -98,15 +122,15 @@ def main(argv=None) -> int:
 
     # Optional teardown-churn cycle test (fresh driver each cycle).
     if args.cycles > 0:
-        def factory():
-            from vision.config_loader import load_camera_config
-            cfg = load_camera_config(args.config)
-            if args.serial:
-                cfg.serial = args.serial
-            return SpinnakerCameraDriver(cfg)
-        cyc = run_connect_cycles(factory, cycles=args.cycles,
-                                 frames_per_cycle=args.frames_per_cycle)
-        report.checks.append(cyc)
+        report.checks.append(run_connect_cycles(
+            factory, cycles=args.cycles,
+            frames_per_cycle=args.frames_per_cycle))
+
+    # Optional STRESS: automated mid-stream interrupt/recover (fresh driver).
+    if args.stress_reconnect > 0:
+        report.checks.append(run_recovery_cycles(
+            factory(), cycles=args.stress_reconnect,
+            frames_per_cycle=args.frames_per_cycle))
 
     print(report.format())
     return 0 if report.passed else 1

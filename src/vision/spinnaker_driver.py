@@ -45,6 +45,8 @@ class SpinnakerCameraDriver(CameraDriver):
         self._pyspin: Any = None # module handle
         self._processor: Any = None # PySpin.ImageProcessor (host debayer/convert)
         self._lost = False # device removed/aborted mid-stream (hot-unplug)
+        self._ts_offset_s: Optional[float] = None # device->host clock offset
+                                                  # (opt-in timestamp_sync)
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Lifecycle
@@ -93,6 +95,11 @@ class SpinnakerCameraDriver(CameraDriver):
             # (matters on reconnect after a USB re-enumeration); no-op when ready.
             self._await_ready()
             self._apply_initial_config()
+            # Opt-in (default-preserving): re-latched every connect so a
+            # reconnect after a power-cycle / re-enumeration picks up the new
+            # device-clock epoch. No-op unless config.timestamp_sync is set.
+            if self.config.timestamp_sync:
+                self._latch_timestamp_offset()
             # Safety net: if the process exits without a clean disconnect()
             # (unhandled exception, Ctrl-C), still DeInit the camera and release
             # the System singleton so the SDK doesn't crash at interpreter exit.
@@ -144,6 +151,7 @@ class SpinnakerCameraDriver(CameraDriver):
         # Clean teardown done; the atexit safety net is no longer needed.
         atexit.unregister(self._release_on_exit)
         self._lost = False
+        self._ts_offset_s = None  # re-latched on the next connect
         self._set_status(CameraStatus.DISCONNECTED)
 
     def _release_on_exit(self) -> None:
@@ -229,7 +237,7 @@ class SpinnakerCameraDriver(CameraDriver):
         try:
             if img.IsIncomplete():
                 raise MalformedFrameError(
-                    f"Incomplete image: {img.GetImageStatus()}")
+                    f"Incomplete image: {self._image_status_text(img)}")
             # Convert to the requested output format on the host. For color
             # cameras (e.g. BFS-U3-16S2C-CS, native BayerRG8) this debayers to
             # BGR8; for mono it is an inexpensive passthrough/copy.
@@ -239,6 +247,13 @@ class SpinnakerCameraDriver(CameraDriver):
         finally:
             img.Release()
 
+        # Opt-in: tag the host-timebase capture time when timestamp_sync latched
+        # an offset. Empty dict otherwise => the default path is unchanged.
+        meta: dict = {}
+        host_t = self.device_to_host_time(hw_ts)
+        if host_t is not None:
+            meta["host_capture_time_s"] = host_t
+
         return CameraFrame(
             data=data,
             timestamp=time.monotonic(),
@@ -247,7 +262,65 @@ class SpinnakerCameraDriver(CameraDriver):
             hw_timestamp_ns=hw_ts,
             device_frame_id=device_fid,
             pixel_format=self.config.output_pixel_format,
+            metadata=meta,
         )
+
+    def _latch_timestamp_offset(self) -> None:
+        """Latch the device clock against the host clock once to get a
+        device->host offset (opt-in config.timestamp_sync).
+
+        BFS/Oryx/Firefly-DL expose TimestampLatch (a command) + the latched
+        value (TimestampLatchValue, falling back to the Timestamp node). We
+        sample the host monotonic clock immediately on either side of the latch
+        and use the midpoint to minimise the read-latency error. Best-effort: on
+        any failure the offset stays None and frames simply carry no host time.
+
+        We use time.monotonic() (not wall time) so the result shares CameraFrame
+        .timestamp's timebase and is directly comparable to it.
+        """
+        self._ts_offset_s = None
+        latch = getattr(self._cam, "TimestampLatch", None)
+        value = (getattr(self._cam, "TimestampLatchValue", None)
+                 or getattr(self._cam, "Timestamp", None))
+        if latch is None or value is None:
+            log.warning("timestamp_sync requested but TimestampLatch/value node "
+                        "unavailable; device timestamps left un-synced")
+            return
+        try:
+            t0 = time.monotonic()
+            latch.Execute()
+            dev_ns = value.GetValue()
+            t1 = time.monotonic()
+            self._ts_offset_s = (t0 + t1) / 2.0 - dev_ns / 1e9
+            log.info("Timestamp sync: device->host offset = %.6fs",
+                     self._ts_offset_s)
+        except self._pyspin.SpinnakerException as e:
+            log.warning("Timestamp latch failed; device timestamps un-synced: %s",
+                        e)
+
+    def device_to_host_time(self, device_ns: Optional[int]) -> Optional[float]:
+        """Convert a device timestamp (ns) to host monotonic seconds using the
+        latched offset, or None if sync is off / unavailable. Lets a consumer
+        re-derive a host time for any device_ns it holds."""
+        if device_ns is None or self._ts_offset_s is None:
+            return None
+        return device_ns / 1e9 + self._ts_offset_s
+
+    def _image_status_text(self, img) -> str:
+        """Human-readable Spinnaker image status for NFR-006 diagnostics.
+
+        Image.GetImageStatusDescription() names the likely cause (e.g. an
+        incomplete frame -> "missing packet(s)", the classic USB3-bandwidth
+        symptom on a shared bus) instead of an opaque enum int, which is far
+        more actionable in the logs. Best-effort: falls back to the numeric
+        status if the SDK lacks the helper (older SDKs / non-Spinnaker mocks).
+        """
+        status = img.GetImageStatus()
+        try:
+            desc = self._pyspin.Image.GetImageStatusDescription(status)
+            return f"{desc} ({status})"
+        except Exception:  # never let diagnostics break the skip-and-continue
+            return str(status)
 
     def _chunk_frame_id(self, img) -> Optional[int]:
         """Device frame counter from chunk data, or None if chunk data is off /
@@ -519,7 +592,13 @@ class SpinnakerCameraDriver(CameraDriver):
                 converted = img.Convert(target, getattr(PySpin, "HQ_LINEAR", 0))
             # copy before `converted` goes out of scope and frees its buffer
             return np.array(converted.GetNDArray(), copy=True)
-        except PySpin.SpinnakerException as e:
+        except Exception as e:
+            # Degrade to the raw device frame on ANY conversion failure, never
+            # crash the worker (NFR-006). Besides SpinnakerException, the legacy
+            # branch can raise AttributeError: Spinnaker >= 4.x removed
+            # ImagePtr.Convert (conversion is ImageProcessor-only), so if the
+            # processor is ever absent on a modern SDK, img.Convert() does not
+            # exist — that must still fall back here, not propagate out.
             log.warning("Pixel-format conversion failed (%s); using raw frame",
                         e)
             return np.array(img.GetNDArray(), copy=True)

@@ -21,8 +21,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "src"))
 
-from vision.acceptance import (AcceptanceCriteria, FrameStat, Metrics, evaluate,
-                               run_acceptance, run_connect_cycles)
+from vision.acceptance import (AcceptanceCriteria, FrameStat, Metrics,
+                               evaluate, run_acceptance, run_bandwidth_stress,
+                               run_connect_cycles, run_recovery_cycles)
 from vision.camera_driver import CameraError
 from vision.camera_service import CameraService
 from vision.camera_types import CameraConfig, CameraFeature
@@ -201,6 +202,48 @@ class TestAcceptanceIntegration(unittest.TestCase):
 
         res = run_connect_cycles(lambda: _BadDriver(cfg), cycles=2)
         self.assertFalse(res.passed)
+
+    def test_recovery_cycles_pass(self):
+        # Mid-stream interrupt/recover loop resumes frames every cycle.
+        drv = GenericCameraDriver(self._config(), n_spots=3)
+        res = run_recovery_cycles(drv, cycles=3, frames_per_cycle=2,
+                                  read_timeout=2.0)
+        self.assertTrue(res.passed, res.detail)
+
+    def test_recovery_cycles_detect_failure(self):
+        # A backend that cannot re-acquire after the first connect must FAIL.
+        class _NoRecoverDriver(GenericCameraDriver):
+            def __init__(self, cfg, **kw):
+                super().__init__(cfg, **kw)
+                self._connects = 0
+
+            def connect(self):
+                self._connects += 1
+                if self._connects > 1:
+                    raise CameraError("cannot re-acquire")
+                super().connect()
+
+        drv = _NoRecoverDriver(self._config(), n_spots=3)
+        res = run_recovery_cycles(drv, cycles=2, frames_per_cycle=2)
+        self.assertFalse(res.passed)
+
+    def test_bandwidth_stress_pass_and_restores_config(self):
+        # Under a throughput squeeze the sim still streams stably; the original
+        # link_throughput_limit_bps is restored afterwards (non-persisted).
+        svc = CameraService()
+        drv = GenericCameraDriver(self._config(), n_spots=5)
+        svc.add_camera("acc", drv)
+        svc.connect("acc")
+        crit = AcceptanceCriteria(
+            seconds=1.0, min_fps=5.0, require_color=True,
+            require_hw_timestamp=False, min_mean_level=1.0, sample_every=3)
+        self.assertIsNone(drv.config.link_throughput_limit_bps)
+        try:
+            res = run_bandwidth_stress(svc, "acc", crit, limit_bps=1_000_000)
+        finally:
+            svc.shutdown()
+        self.assertTrue(res.passed, res.detail)
+        self.assertIsNone(drv.config.link_throughput_limit_bps)  # restored
 
 
 if __name__ == "__main__":

@@ -63,3 +63,10 @@ link_throughput_limit_bps: null   # int Bytes/s | null -> DeviceLinkThroughputLi
                                   # camera a slice summing under controller capacity. ~93 MB/s is
                                   # 1440x1080 BayerRG8 @60fps. Below the fps need lowers the rate;
                                   # get_health() reports link_throughput_bps + resulting_fps.
+
+# --- Timestamps ---------------------------------------------------------------
+timestamp_sync: false             # bool. false = unchanged path (device hw_timestamp_ns only).
+                                  # true -> latch device clock vs host once at connect
+                                  # (TimestampLatch/TimestampLatchValue) and tag each frame's
+                                  # metadata["host_capture_time_s"] on the host monotonic timebase,
+                                  # for correlating frames to host events / other cameras.

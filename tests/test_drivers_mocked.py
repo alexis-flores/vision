@@ -52,6 +52,10 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
     for nm in ("PixelFormat_BGR8", "PixelFormat_RGB8", "PixelFormat_Mono8",
                "PixelFormat_Mono16", "PixelFormat_BayerRG8"):
         setattr(PySpin, nm, nm)
+    # Static Image.GetImageStatusDescription(status) -> human-readable text,
+    # mirroring the real SDK (used by the driver's NFR-006 diagnostics).
+    PySpin.Image = type("Image", (), {
+        "GetImageStatusDescription": staticmethod(lambda s: f"status-desc-{s}")})
     PySpin.ChunkSelector_FrameID = "ChunkSelector_FrameID"
     PySpin.ChunkSelector_Timestamp = "ChunkSelector_Timestamp"
     PySpin.UserSetSelector_Default = "UserSetSelector_Default"
@@ -141,6 +145,8 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             self.UserSetSelector = Enum()
             self.UserSetDefault = Enum()
             self.UserSetLoad = Command()
+            self.TimestampLatch = Command()
+            self.TimestampLatchValue = Num(123456789, 0, 2**63)  # matches img ts
             self.inited = self.acquiring = False
             self.deinit_calls = self.endacq_calls = 0
         def Init(self): self.inited = True
@@ -333,11 +339,55 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         self.assertEqual(fake._cam.endacq_calls, 1)
         self.assertEqual(fake._cam.deinit_calls, 1)
 
+    def test_timestamp_sync_off_by_default(self):
+        # Default path is unchanged: no latch executed, no host time on frames.
+        fake, drv = self._install()
+        drv.connect(); drv.start_stream()
+        frame = drv.read_frame(timeout=1.0)
+        self.assertFalse(fake._cam.TimestampLatch.executed)
+        self.assertNotIn("host_capture_time_s", frame.metadata)
+        self.assertIsNone(drv.device_to_host_time(123456789))
+        drv.stop_stream(); drv.disconnect()
+
+    def test_timestamp_sync_opt_in_tags_host_time(self):
+        # Opt-in: connect latches a device->host offset; each frame carries
+        # host_capture_time_s on the host monotonic timebase.
+        fake, drv = self._install()
+        drv.config.timestamp_sync = True
+        drv.connect()
+        self.assertTrue(fake._cam.TimestampLatch.executed)   # latched at connect
+        self.assertIsNotNone(drv._ts_offset_s)
+        drv.start_stream()
+        frame = drv.read_frame(timeout=1.0)
+        self.assertIn("host_capture_time_s", frame.metadata)
+        # host time == hw_timestamp_ns/1e9 + offset (the converter is the source)
+        expected = drv.device_to_host_time(frame.hw_timestamp_ns)
+        self.assertAlmostEqual(frame.metadata["host_capture_time_s"], expected)
+        drv.stop_stream(); drv.disconnect()
+        self.assertIsNone(drv._ts_offset_s)   # cleared on disconnect
+
+    def test_convert_without_processor_degrades_not_crashes(self):
+        # Spinnaker >= 4.x removed ImagePtr.Convert, so when self._processor is
+        # None the legacy img.Convert() raises AttributeError (NOT a
+        # SpinnakerException). read_frame must DEGRADE to the raw frame, never
+        # let that escape and kill the worker thread (NFR-006). The fake Image
+        # has no Convert method, reproducing the real-SDK AttributeError.
+        fake, drv = self._install()
+        drv.connect()
+        drv._processor = None                 # force the legacy fallback branch
+        drv.start_stream()
+        frame = drv.read_frame(timeout=1.0)   # must not raise
+        self.assertIsNotNone(frame.data)
+        drv.stop_stream(); drv.disconnect()
+
     def test_incomplete_frame_is_malformed(self):
         fake, drv = self._install(incomplete=True)
         drv.connect(); drv.start_stream()
-        with self.assertRaises(MalformedFrameError):
+        with self.assertRaises(MalformedFrameError) as ctx:
             drv.read_frame(timeout=0.5)
+        # NFR-006 diagnostics: the message carries the human-readable status
+        # description (Image.GetImageStatusDescription), not just the enum int.
+        self.assertIn("status-desc-9", str(ctx.exception))
 
     def test_no_serial_warns_and_selects_by_index(self):  # NFR-005 footgun
         # Without a serial, selection falls back to device_index, which is not

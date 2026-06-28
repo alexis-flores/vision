@@ -55,6 +55,10 @@ all = ["vision-system[gui,yaml,dev]"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# PEP 561: ship the inline type hints so downstream type-checkers honour them.
+[tool.setuptools.package-data]
+vision = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 120          # fail (don't hang) if a threaded test deadlocks

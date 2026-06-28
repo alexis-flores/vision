@@ -42,7 +42,8 @@ log = logging.getLogger(__name__)
 
 # Hook for the (future, out-of-scope) cueing pipeline. Receives each frame on
 # the cueing worker thread, so it should return reasonably quickly; anything
-# slow should hand off to its own worker/buffer.
+# slow should hand off to its own worker/buffer. The frame's pixel buffer is
+# read-only and shared with the GUI sink — copy before any in-place pixel op.
 FrameProcessor = Callable[[CameraFrame], None]
 
 

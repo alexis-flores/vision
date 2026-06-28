@@ -23,7 +23,12 @@ from .camera_types import CameraFrame
 
 @runtime_checkable
 class FrameSink(Protocol):
-    """Anything the camera service can push frames into."""
+    """Anything the camera service can push frames into.
+
+    The pushed CameraFrame is shared across all sinks and its pixel buffer is
+    read-only (see CameraFrame.__post_init__); a sink that needs to modify
+    pixels must copy first. Implementations must not block the producer.
+    """
     def push(self, frame: CameraFrame) -> None: ...
 
 

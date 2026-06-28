@@ -115,6 +115,13 @@ class CameraConfig:
     # None = SDK default (unchanged). Raise it when multiple cameras sharing a
     # USB3/PCIe link drop frames under bandwidth contention.
     stream_buffer_count: Optional[int] = None
+    # Optional per-camera bandwidth cap in Bytes/s (Spinnaker
+    # DeviceLinkThroughputLimit). None = device default (unchanged). On a
+    # multi-camera USB3 rig this is THE knob to partition the shared bus: give
+    # each camera a slice that sums to under the controller's capacity so none
+    # starves and drops frames. Lower than what the requested fps needs will
+    # reduce the achievable rate. A single camera needs no limit.
+    link_throughput_limit_bps: Optional[int] = None
 
     def __post_init__(self) -> None:
         self.max_pixel_count = self.max_resolution[0] * self.max_resolution[1]
@@ -182,6 +189,18 @@ class CameraFrame:
                                           # gaps == authoritative dropped frames
     pixel_format: Optional[PixelFormat] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Frames fan out to multiple sinks (cueing ring + GUI FIFO) as the SAME
+        # object sharing the SAME ndarray. Mark the pixel buffer read-only so an
+        # in-place write by any consumer (e.g. a future cueing processor doing
+        # `img -= bg`) fails LOUDLY here instead of silently corrupting what the
+        # other sinks see. Consumers that need to modify pixels must copy first.
+        # Best-effort: a buffer that's already read-only / can't toggle is fine.
+        try:
+            self.data.flags.writeable = False
+        except (ValueError, AttributeError):
+            pass
 
     @property
     def shape(self) -> Tuple[int, ...]:

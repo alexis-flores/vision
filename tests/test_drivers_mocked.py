@@ -132,6 +132,9 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             self.AcquisitionFrameRateEnable = Enum()
             self.AcquisitionMode = Enum()
             self.DeviceTemperature = Num(45.5, 0.0, 100.0)
+            self.DeviceLinkThroughputLimit = Num(380000000, 0, 480000000)
+            self.DeviceLinkCurrentThroughput = Num(93312000, 0, 480000000)
+            self.AcquisitionResultingFrameRate = Num(60.0, 1.0, 226.0)
             self.ChunkModeActive = Enum()
             self.ChunkSelector = Enum()
             self.ChunkEnable = Enum()
@@ -235,6 +238,22 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         snm2 = fake2._cam.GetTLStreamNodeMap()
         drv2.connect(); drv2.start_stream()
         self.assertEqual(snm2.GetNode("StreamBufferCountManual").GetValue(), 20)
+        drv2.stop_stream(); drv2.disconnect()
+
+    def test_link_throughput_limit_opt_in(self):
+        # Default (None) leaves the device default; a set value is applied at
+        # start_stream via DeviceLinkThroughputLimit (USB3 multi-cam bandwidth).
+        fake, drv = self._install()
+        drv.connect(); drv.start_stream()
+        self.assertEqual(fake._cam.DeviceLinkThroughputLimit.GetValue(),
+                         380000000)  # untouched default
+        drv.stop_stream(); drv.disconnect()
+
+        fake2, drv2 = self._install()
+        drv2.config.link_throughput_limit_bps = 120000000
+        drv2.connect(); drv2.start_stream()
+        self.assertEqual(fake2._cam.DeviceLinkThroughputLimit.GetValue(),
+                         120000000)
         drv2.stop_stream(); drv2.disconnect()
 
     def test_reset_to_defaults(self):
@@ -363,6 +382,15 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         drv.connect()
         health = drv.get_health()
         self.assertAlmostEqual(health["temperature_c"], 45.5)
+        drv.disconnect()
+
+    def test_get_health_reports_throughput_and_resulting_fps(self):
+        # Bandwidth / actual-rate telemetry for the BFS (saturation diagnostic).
+        fake, drv = self._install()
+        drv.connect()
+        health = drv.get_health()
+        self.assertAlmostEqual(health["resulting_fps"], 60.0)
+        self.assertAlmostEqual(health["link_throughput_bps"], 93312000.0)
         drv.disconnect()
 
 

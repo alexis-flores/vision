@@ -339,10 +339,17 @@ class SpinnakerCameraDriver(CameraDriver):
                     health[name] = val
         except pyspin.SpinnakerException as e:
             log.debug("Stream statistics read failed: %s", e)
-        # Live acquisition settings (tuning feedback for the GUI).
+        # Live acquisition settings + bandwidth/rate telemetry (tuning feedback
+        # for the GUI and a bandwidth-saturation diagnostic on a shared bus).
+        # AcquisitionResultingFrameRate is the rate the device can actually
+        # sustain given exposure + throughput limits — if it sits below the
+        # requested fps you're exposure- or bandwidth-bound.
         for key, node_name in (("exposure_us", "ExposureTime"),
                                ("gain_db", "Gain"),
-                               ("fps", "AcquisitionFrameRate")):
+                               ("fps", "AcquisitionFrameRate"),
+                               ("resulting_fps", "AcquisitionResultingFrameRate"),
+                               ("link_throughput_bps",
+                                "DeviceLinkCurrentThroughput")):
             node = getattr(cam, node_name, None)
             if node is None:
                 continue
@@ -440,6 +447,20 @@ class SpinnakerCameraDriver(CameraDriver):
                              self.config.stream_buffer_count)
             except PySpin.SpinnakerException as e:
                 log.warning("Could not set stream buffer count: %s", e)
+        # Optional bandwidth cap (default: leave the device default untouched, so
+        # a single-camera rig is unchanged). On a shared USB3 bus this partitions
+        # bandwidth across cameras. Must be set before BeginAcquisition.
+        if self.config.link_throughput_limit_bps:
+            node = getattr(self._cam, "DeviceLinkThroughputLimit", None)
+            if node is not None:
+                try:
+                    node.SetValue(self._clamp(
+                        "link_throughput_limit_bps", node,
+                        int(self.config.link_throughput_limit_bps)))
+                    log.info("DeviceLinkThroughputLimit set to %d Bps",
+                             self.config.link_throughput_limit_bps)
+                except PySpin.SpinnakerException as e:
+                    log.warning("Could not set DeviceLinkThroughputLimit: %s", e)
         self._enable_chunk_data()
 
     def _enable_chunk_data(self) -> None:

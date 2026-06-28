@@ -52,3 +52,14 @@ exposure_us: 5000.0       # float microseconds -> ExposureTime, sets ExposureAut
                           # (<= 16600 us at 60 fps). Main brightness knob.
 gain_db: 0.0              # float dB, ~0..47 -> Gain, sets GainAuto=Off (needs GAIN). Clamped to
                           # the device range. Raise only if still too dark after exposure.
+
+# --- Bandwidth / buffering (multi-camera USB3 rigs; single camera: leave null) -
+stream_buffer_count: null         # int | null -> StreamBufferCountManual (mode=Manual). null =
+                                  # SDK default. Raise to absorb bursts when cameras share a
+                                  # USB3 controller/PCIe lane and drop frames. Watch
+                                  # StreamLostFrameCount/StreamDroppedFrameCount in get_health().
+link_throughput_limit_bps: null   # int Bytes/s | null -> DeviceLinkThroughputLimit. null = device
+                                  # default. THE knob to partition a shared USB3 bus: give each
+                                  # camera a slice summing under controller capacity. ~93 MB/s is
+                                  # 1440x1080 BayerRG8 @60fps. Below the fps need lowers the rate;
+                                  # get_health() reports link_throughput_bps + resulting_fps.

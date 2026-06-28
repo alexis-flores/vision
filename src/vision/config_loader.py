@@ -68,11 +68,25 @@ def load_camera_configs(path: str) -> List[CameraConfig]:
     """
     Load one or more camera configs. Accepts either a single config object
     or {"cameras": [ {...}, {...} ]} for multi-camera rigs.
+
+    Camera names must be unique: the service keys cameras by name and rejects
+    a duplicate at registration, so we catch it here (as a ConfigError that
+    callers already handle) rather than letting it surface as a raw ValueError
+    mid-registration with the service half-populated.
     """
     raw = _load_raw(path)
     if isinstance(raw, dict) and "cameras" in raw:
-        return [_config_from_dict(c) for c in raw["cameras"]]
-    return [_config_from_dict(raw)]
+        configs = [_config_from_dict(c) for c in raw["cameras"]]
+    else:
+        configs = [_config_from_dict(raw)]
+    seen: set[str] = set()
+    for cfg in configs:
+        if cfg.name in seen:
+            raise ConfigError(
+                f"Duplicate camera name {cfg.name!r} in {path}; "
+                f"each camera must have a unique 'name'")
+        seen.add(cfg.name)
+    return configs
 
 
 def _config_from_dict(d: Dict[str, Any]) -> CameraConfig:

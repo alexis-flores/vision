@@ -402,11 +402,23 @@ deferred or are system-level config:
   whitelist (gain, exposure, fps, width/height, black level, gamma). A real rig
   often needs more: the trigger nodes above, **binning**/decimation, explicit
   **ROI offset** (beyond the reset-to-min the driver already does), white
-  balance, LUT — and for **GigE** cameras, `DeviceLinkThroughputLimit` plus
-  packet size/delay (`GevSCPSPacketSize`/`GevSCPD`) to share link bandwidth
-  across cameras. Any node is reachable via `GetNodeMap().GetNode(name)`;
-  extending `_ATTR_MAP` (with auto-mode-off handling where needed, as exposure/
-  gain already do) is the additive path — no change to the validated frame path.
+  balance, LUT — and for **GigE** cameras, packet size/delay
+  (`GevSCPSPacketSize`/`GevSCPD`) to share link bandwidth. Any node is reachable
+  via `GetNodeMap().GetNode(name)`; extending `_ATTR_MAP` (with auto-mode-off
+  handling where needed, as exposure/gain already do) is the additive path — no
+  change to the validated frame path.
+
+- **Link throughput limit — built in.** Set **`link_throughput_limit_bps`** in
+  the config (the driver applies `DeviceLinkThroughputLimit`, in Bytes/s); leave
+  it unset for the device default. On the BFS-U3-16S2C-CS this is a **USB3** node
+  (the technical reference quotes its frame-rate tables at a 380 MBps limit), and
+  it's the primary knob for a **multi-camera USB3 rig**: give each camera a slice
+  of the shared controller's bandwidth that sums under capacity so none starves
+  and drops frames. `get_health()` surfaces `link_throughput_bps`
+  (`DeviceLinkCurrentThroughput`) and `resulting_fps`
+  (`AcquisitionResultingFrameRate`) so you can see saturation — if `resulting_fps`
+  sits below the requested fps you're exposure- or bandwidth-bound. A single
+  camera (≈93 MB/s at 60 fps BayerRG8) needs no limit, so the default is unchanged.
 
 - **Stream buffer count — built in.** Set **`stream_buffer_count`** in the config
   (the driver applies `StreamBufferCountMode=Manual` + `StreamBufferCountManual`);
@@ -414,7 +426,9 @@ deferred or are system-level config:
   controller or PCIe lane**, bandwidth contention can drop frames if the pool is
   too small — raise it and watch `StreamLostFrameCount`/`StreamDroppedFrameCount`
   (in `get_health()`). A single camera at 60 fps doesn't need it (0 drops
-  observed), so the default is unchanged.
+  observed), so the default is unchanged. (Buffer count absorbs *bursts*;
+  `link_throughput_limit_bps` partitions *sustained* bandwidth — use both on a
+  dense rig.)
 
 - **Low-jitter / real-time timing — built in (`--rt`) + OS tuning.** `--rt`
   freezes + disables Python's GC during the run and raises the camera worker(s)
@@ -439,12 +453,22 @@ sudo nano /etc/default/grub      # ...="quiet splash usbcore.usbfs_memory_mb=100
 sudo update-grub && sudo reboot
 ```
 
-**Phase 1 — Spinnaker SDK + PySpin.** Download both for **Ubuntu 22.04 / amd64**
-from the Teledyne FLIR site (account required):
+**Phase 1 — Spinnaker SDK + PySpin.** Download **two separate** archives for
+**Ubuntu 22.04 / amd64** from the Teledyne FLIR site (account required) — the SDK
+(`spinnaker-<ver>-amd64-pkg-22.04.tar.gz`, which holds the `.deb`s +
+`install_spinnaker.sh`) and the Python bindings
+(`spinnaker_python-<ver>-cp310-...-22.04.tar.gz`, which holds the wheel). The
+macOS `.pkg` in `Spinnaker_Download/` is **not** the Linux package — don't use it
+on the rig.
 
 ```bash
+# SDK: extract, then run FLIR's installer from inside the extracted dir
+tar xf spinnaker-<ver>-amd64-pkg-22.04.tar.gz && cd spinnaker-<ver>-amd64
 sudo sh install_spinnaker.sh        # SAY YES to udev rules + flirimaging group
 # then log out / back in so the group membership takes effect
+
+# Bindings: extract the python tarball to get the wheel
+tar xf spinnaker_python-<ver>-cp310-*-22.04.tar.gz
 
 python3.10 -m venv .venv && source .venv/bin/activate   # match the wheel's Python
 pip install -e .

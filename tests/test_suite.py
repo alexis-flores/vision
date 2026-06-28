@@ -113,6 +113,15 @@ class TestConfigLoader(unittest.TestCase):  # UT-001
         with self.assertRaises(ConfigError):
             load_camera_config(path)
 
+    def test_duplicate_camera_name_errors(self):  # error case
+        # Two cameras sharing a name would crash registration with a raw
+        # ValueError mid-loop; load-time it's a clean ConfigError instead.
+        path = self._write({"cameras": [
+            {"name": "dup", "max_resolution": [512, 512]},
+            {"name": "dup", "max_resolution": [512, 512]}]})
+        with self.assertRaises(ConfigError):
+            load_camera_configs(path)
+
 
 class TestConfigValidation(unittest.TestCase):  # NFR-001/003/004
     def test_compliant_has_no_warnings(self):
@@ -161,6 +170,16 @@ class TestGenericDriver(unittest.TestCase):  # UT-002
         self.drv.connect()
         with self.assertRaises(CameraError):
             self.drv.read_frame(timeout=0.1)
+
+    def test_frame_buffer_is_read_only(self):  # immutability contract
+        # Frames fan out to multiple sinks sharing one ndarray, so the buffer
+        # must be read-only: an in-place write fails loudly instead of silently
+        # corrupting other consumers.
+        self.drv.connect(); self.drv.start_stream()
+        frame = self.drv.read_frame(timeout=1.0)
+        self.assertFalse(frame.data.flags.writeable)
+        with self.assertRaises(ValueError):
+            frame.data[0, 0] = 0
 
     def test_unsupported_feature_errors(self):  # error
         self.drv.connect()

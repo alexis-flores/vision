@@ -7,11 +7,12 @@ name = "vision-system"
 version = "2.0.0"
 description = "Real-time camera backend and frame-serving pipeline (SRS v0.2 implementation)"
 readme = "README.md"
-# Floor is 3.10: the Spinnaker/PySpin wheels for the BFS-U3-16S2C cap at CPython
-# 3.10, so the real-hardware path runs on 3.10. No upper cap — the sim / tests /
-# dev tooling run fine on newer CPython (the spinnaker backend just isn't usable
-# there, which surfaces as a clean "PySpin not installed").
-requires-python = ">=3.10"
+# Pinned to CPython 3.10: the Spinnaker/PySpin wheels for the BFS-U3-16S2C cap at
+# 3.10, so the camera only works there. PySpin isn't a declared dependency (it's
+# the vendor cp310 wheel, installed by hand + lazy-imported), so this constraint
+# doesn't resolve it — it just keeps the whole project on the one runtime the rig
+# uses, so dev/test/deploy can't drift onto a Python where the camera won't load.
+requires-python = ">=3.10,<3.11"
 license = { text = "Proprietary" }
 
 # Core runtime: camera abstraction, service layer, frame buffers, and the

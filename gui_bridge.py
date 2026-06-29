@@ -24,6 +24,7 @@ Requires: pip install PyQt6   (swap imports to PyQt5 if needed)
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable, Optional
 
@@ -38,6 +39,12 @@ from vision.frame_buffers import FIFOFrameBuffer
 
 GUI_POLL_MS = 33        # ~30 FPS visualization (SRS 5.4)
 STATS_REFRESH_S = 0.5   # recompute FPS / read health+stats at ~2 Hz (cheap path)
+
+# Optional brand logo overlay. Drop a PNG (transparent background recommended)
+# at assets/logo.png and it appears in the top-right of the live view
+# automatically; if the file is absent, nothing is shown.
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "assets", "logo.png")
 
 # Optional callbacks the viewer polls for live telemetry, kept decoupled from
 # CameraService (e.g. lambda: svc.get_health(cam) / lambda: svc.stats(cam)).
@@ -78,11 +85,13 @@ class CameraViewer(QMainWindow):
     """
 
     HUD_MARGIN = 12
+    LOGO_HEIGHT = 40        # logo overlay scaled to this px height (aspect kept)
 
     def __init__(self, fifo: FIFOFrameBuffer, title: str = "Camera",
                  poll_ms: int = GUI_POLL_MS,
                  health_fn: Optional[HealthFn] = None,
-                 stats_fn: Optional[StatsFn] = None) -> None:
+                 stats_fn: Optional[StatsFn] = None,
+                 logo_path: Optional[str] = None) -> None:
         super().__init__()
         self.setWindowTitle(title)
         self._fifo = fifo
@@ -130,6 +139,18 @@ class CameraViewer(QMainWindow):
             " font-family: 'Menlo','Consolas','DejaVu Sans Mono',monospace; }")
         self._hud.move(self.HUD_MARGIN, self.HUD_MARGIN)
         self._hud.hide()
+
+        # Brand logo overlay (top-right), balancing the top-left HUD. It sits on
+        # the same subtle translucent panel as the HUD so it reads over any
+        # frame. Stays hidden unless a readable image exists at `logo_path`
+        # (default: assets/logo.png) — a missing file is a silent no-op.
+        self._logo = QLabel(self._label)
+        self._logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._logo.setStyleSheet(
+            "QLabel { background-color: rgba(0, 0, 0, 140);"
+            " padding: 6px; border-radius: 6px; }")
+        self._logo.hide()
+        self._load_logo(logo_path or LOGO_PATH)
 
         self._statusbar = QStatusBar()    # kept as a typed ref (statusBar()->Optional)
         self.setStatusBar(self._statusbar)  # bottom: per-frame + bookkeeping detail
@@ -221,6 +242,32 @@ class CameraViewer(QMainWindow):
         if self._lost is not None:
             detail.append(f"lost {self._lost}")
         self._statusbar.showMessage("    ·    ".join(detail))
+
+    def _load_logo(self, path: str) -> None:
+        """Show the brand logo overlay if `path` is a readable image; otherwise
+        leave it hidden, so a missing/unreadable file is a silent no-op rather
+        than an error (the live view never depends on the logo)."""
+        pix = QPixmap(path)
+        if pix.isNull():
+            return
+        self._logo.setPixmap(pix.scaledToHeight(
+            self.LOGO_HEIGHT, Qt.TransformationMode.SmoothTransformation))
+        self._logo.adjustSize()
+        self._logo.show()
+        self._logo.raise_()
+        self._reposition_logo()
+
+    def _reposition_logo(self) -> None:
+        """Pin the logo to the top-right of the video area, tracking resizes."""
+        if self._logo.isHidden():
+            return
+        x = self._label.width() - self._logo.width() - self.HUD_MARGIN
+        self._logo.move(max(self.HUD_MARGIN, x), self.HUD_MARGIN)
+        self._logo.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reposition_logo()
 
     @staticmethod
     def _safe_call(fn: Optional[Callable[[], dict]]) -> dict:

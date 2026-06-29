@@ -76,6 +76,27 @@ class TestCameraViewer(unittest.TestCase):
         self.assertIn("10.0 ms", hud)      # exposure value (10000 us -> 10.0 ms)
         self.assertIn("frame 1", win.statusBar().currentMessage())
 
+    def test_logo_absent_is_hidden(self):
+        # No image at the path -> logo overlay stays hidden (silent no-op).
+        win = gui_bridge.CameraViewer(
+            FIFOFrameBuffer(2), logo_path="/no/such/logo.png")
+        self.assertTrue(win._logo.isHidden())
+        win.close()
+
+    def test_logo_present_is_shown_top_right(self):
+        # A readable image -> logo overlay is shown and pinned to the top-right.
+        import tempfile
+        from PyQt6.QtGui import QImage
+        path = os.path.join(tempfile.mkdtemp(), "logo.png")
+        QImage(64, 24, QImage.Format.Format_RGBA8888).save(path)
+        win = gui_bridge.CameraViewer(FIFOFrameBuffer(2), logo_path=path)
+        win.resize(800, 600)
+        win.show()
+        self.assertFalse(win._logo.isHidden())
+        # right edge sits within the video area, past the horizontal midpoint
+        self.assertGreater(win._logo.x(), win._label.width() // 2)
+        win.close()
+
     def test_works_without_callbacks_and_mono(self):
         fifo = FIFOFrameBuffer(4)
         fifo.push(_frame(7, color=False))  # exercises the mono path

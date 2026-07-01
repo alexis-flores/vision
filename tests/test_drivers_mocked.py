@@ -500,21 +500,32 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         self.assertNotIn("chunk_exposure_us", m)
         drv.stop_stream(); drv.disconnect()
 
-    def test_chunk_crc_failure_is_malformed(self):
-        # Opt-in chunk_crc: a CRC-failed (but 'complete') frame -> Malformed.
+    def test_chunk_crc_failure_flags_and_delivers(self):
+        # Opt-in chunk_crc: a CRC-failed (but 'complete') frame is DELIVERED
+        # (never dropped) with metadata["crc_ok"]=False and counted, so a
+        # false-positive CRC can't starve the pipeline.
         fake, drv = self._install(crc_fail=True)
         drv.config.chunk_crc = True
         drv.connect(); drv.start_stream()
-        with self.assertRaises(MalformedFrameError):
-            drv.read_frame(timeout=1.0)
+        frame = drv.read_frame(timeout=1.0)               # must NOT raise
+        self.assertIs(frame.metadata["crc_ok"], False)
+        self.assertEqual(drv.get_health().get("crc_failed_count"), 1)
         drv.stop_stream(); drv.disconnect()
 
-    def test_crc_status_ignored_when_chunk_crc_off(self):
-        # Same CRC-failed status, but chunk_crc off -> frame is delivered (the
-        # integrity gate is strictly opt-in; default path unchanged).
-        fake, drv = self._install(crc_fail=True)
+    def test_chunk_crc_ok_frame_flagged_true(self):
+        fake, drv = self._install()  # crc_fail=False
+        drv.config.chunk_crc = True
         drv.connect(); drv.start_stream()
-        self.assertIsNotNone(drv.read_frame(timeout=1.0).data)  # not malformed
+        self.assertIs(drv.read_frame(timeout=1.0).metadata["crc_ok"], True)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_crc_not_flagged_when_chunk_crc_off(self):
+        # chunk_crc explicitly off -> frame delivered, no crc_ok key.
+        fake, drv = self._install(crc_fail=True)
+        drv.config.chunk_crc = False
+        drv.connect(); drv.start_stream()
+        frame = drv.read_frame(timeout=1.0)
+        self.assertNotIn("crc_ok", frame.metadata)
         drv.stop_stream(); drv.disconnect()
 
     def test_soft_reset_off_by_default(self):

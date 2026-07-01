@@ -349,12 +349,14 @@ class TestSpinnakerFeaturesHW(unittest.TestCase):
         self.assertIn("chunk_exposure_us", f.metadata)
         self.assertGreater(f.metadata["chunk_exposure_us"], 0.0)
 
-    def test_hw_chunk_crc_does_not_starve(self):
-        # CRC checking on: a healthy BFS reports clean CRC, so frames still flow
-        # (a broken/false-positive CRC would reject them all).
+    def test_hw_chunk_crc_flags_and_never_starves(self):
+        # CRC on: every frame is delivered and FLAGGED (crc_ok in metadata); a
+        # healthy BFS reports crc_ok=True. Frames never drop, so CRC can't starve.
         drv = self._driver(chunk_crc=True)
         drv.connect()
-        self.assertEqual(len(self._frames(drv, n=5)), 5)
+        frames = self._frames(drv, n=5)
+        self.assertEqual(len(frames), 5)
+        self.assertIn("crc_ok", frames[-1].metadata)
 
     # --- host colour ------------------------------------------------------ #
 

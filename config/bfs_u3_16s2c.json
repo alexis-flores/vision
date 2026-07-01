@@ -24,7 +24,7 @@
   "ccm_color_temp": "LED_4649K",
   "color_algorithm": "HQ_LINEAR",
   "host_gamma": null,
-  "chunk_crc": false,
+  "chunk_crc": true,
   "chunk_telemetry": true,
   "soft_reset_on_fault": false,
   "read_retry_on_fault": 0,

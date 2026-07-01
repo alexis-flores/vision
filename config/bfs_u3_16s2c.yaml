@@ -87,9 +87,10 @@ host_gamma: null                  # float | null. Optional HOST gamma on color f
                                   # Distinct from the device Gamma node (set_config("gamma")).
 
 # --- Chunk data (per-frame device metadata; default = FrameID + Timestamp only) -
-chunk_crc: false                  # bool. Enable the per-frame CRC chunk and reject CRC-failed
-                                  # frames as malformed (NFR-006) — catches corruption that
-                                  # incompleteness checks miss.
+chunk_crc: true                   # bool (DEFAULT ON). Enable the per-frame CRC chunk. A CRC-failed
+                                  # frame is FLAGGED (metadata["crc_ok"]=False) + counted
+                                  # (get_health crc_failed_count) but still DELIVERED — the consumer
+                                  # decides whether to skip it, so it can't starve the pipeline.
 chunk_telemetry: true             # bool (DEFAULT ON). Enable Exposure/Gain/BlackLevel chunks ->
                                   # the device's ACTUAL per-frame values in frame.metadata
                                   # (chunk_* keys). Purely additive; frames delivered are unchanged.

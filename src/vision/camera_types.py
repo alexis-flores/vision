@@ -157,16 +157,17 @@ class CameraConfig:
     # Named host_gamma to distinguish it from the DEVICE Gamma node, which is a
     # separate mechanism set via set_config("gamma") / the GAMMA feature.
     host_gamma: Optional[float] = None
-    # Opt-in extended GenICam chunk data (default off = only FrameID+Timestamp).
-    #   chunk_crc: enable the per-frame CRC chunk and reject frames that fail the
-    #     CRC check as MalformedFrameError (NFR-006) — catches corruption that
+    # Extended GenICam chunk data (baseline = FrameID + Timestamp; these add
+    # more). Both DEFAULT ON — negligible cost (chunk mode is already active) and
+    # both are additive/safe. Guarded, so a camera without a chunk is a no-op.
+    #   chunk_crc: enable the per-frame CRC chunk. A CRC-failed frame is FLAGGED
+    #     (metadata["crc_ok"]=False) and counted (get_health crc_failed_count),
+    #     but still DELIVERED — the consumer decides whether to skip it, so a
+    #     false-positive CRC can't starve the pipeline. Catches corruption that
     #     IsIncomplete() misses (a "complete" but corrupt frame).
     #   chunk_telemetry: enable ExposureTime/Gain/BlackLevel chunks and surface
     #     the device's ACTUAL per-frame values in frame.metadata (chunk_* keys).
-    #     DEFAULT ON — purely additive metadata (delivered frames are unchanged),
-    #     negligible cost, and useful ground-truth for downstream. Guarded, so a
-    #     camera without those chunks is a no-op.
-    chunk_crc: bool = False
+    chunk_crc: bool = True
     chunk_telemetry: bool = True
     # Opt-in reliability knobs (default off = validated path unchanged;
     # HARDWARE-VALIDATION-PENDING — real behavior needs the camera).

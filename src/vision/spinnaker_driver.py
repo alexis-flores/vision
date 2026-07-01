@@ -49,6 +49,7 @@ class SpinnakerCameraDriver(CameraDriver):
         self._ts_offset_s: Optional[float] = None # device->host clock offset
                                                   # (opt-in timestamp_sync)
         self._ccm_settings: Any = None # PySpin.CCMSettings (opt-in white_balance=ccm)
+        self._crc_failures = 0 # cumulative CRC-failed frames (opt-in chunk_crc)
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Lifecycle
@@ -284,13 +285,11 @@ class SpinnakerCameraDriver(CameraDriver):
                 self._lost = True
                 raise CameraError(f"GetNextImage failed: {e}") from e
 
+        crc_ok: Optional[bool] = None
         try:
             if img.IsIncomplete():
                 raise MalformedFrameError(
                     f"Incomplete image: {self._image_status_text(img)}")
-            if self.config.chunk_crc and self._crc_failed(img):
-                raise MalformedFrameError(
-                    f"CRC check failed: {self._image_status_text(img)}")
             # Convert to the requested output format on the host. For color
             # cameras (e.g. BFS-U3-16S2C-CS, native BayerRG8) this debayers to
             # BGR8; for mono it is an inexpensive passthrough/copy.
@@ -298,12 +297,27 @@ class SpinnakerCameraDriver(CameraDriver):
             hw_ts = img.GetTimeStamp() # ns, device clock
             device_fid = self._chunk_frame_id(img) # device counter (if chunk on)
             chunk_meta = self._chunk_telemetry(img) # actual per-frame exp/gain
+            # Opt-in CRC integrity: FLAG the frame (never drop). A corrupt frame
+            # is delivered with metadata["crc_ok"]=False + counted, so the
+            # consumer decides whether to skip it — a false-positive CRC can't
+            # starve the pipeline (unlike an upstream drop that would reach no
+            # sink at all).
+            if self.config.chunk_crc:
+                crc_ok = not self._crc_failed(img)
+                if not crc_ok:
+                    self._crc_failures += 1
+                    log.warning("Frame %s failed CRC (delivered, flagged "
+                                "crc_ok=False): %s", device_fid,
+                                self._image_status_text(img))
         finally:
             img.Release()
 
-        # Opt-in metadata: host-timebase capture time (timestamp_sync) + per-frame
-        # chunk telemetry. Empty dict otherwise => the default path is unchanged.
+        # Opt-in metadata: host-timebase capture time (timestamp_sync), per-frame
+        # chunk telemetry, and the CRC flag. Empty dict otherwise => the default
+        # path is unchanged.
         meta: dict = dict(chunk_meta)
+        if crc_ok is not None:
+            meta["crc_ok"] = crc_ok
         host_t = self.device_to_host_time(hw_ts)
         if host_t is not None:
             meta["host_capture_time_s"] = host_t
@@ -537,6 +551,9 @@ class SpinnakerCameraDriver(CameraDriver):
                 health[key] = float(node.GetValue())
             except pyspin.SpinnakerException as e:
                 log.debug("%s read failed: %s", node_name, e)
+        # Opt-in CRC integrity counter (frames flagged crc_ok=False, cumulative).
+        if self.config.chunk_crc:
+            health["crc_failed_count"] = self._crc_failures
         return health
 
     def _read_int_node(self, nodemap, name: str) -> Optional[int]:

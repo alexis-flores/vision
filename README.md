@@ -413,10 +413,11 @@ set — see the commented `.yaml` twin for the full field docs):**
   slower) and `host_gamma`. Color is cosmetic for cueing (intensity-based).
 - **Integrity / telemetry** — `chunk_telemetry` (**default on**; purely additive)
   puts the device's actual per-frame exposure/gain/black-level in
-  `frame.metadata`. `chunk_crc` (opt-in) rejects CRC-failed frames as malformed
-  (NFR-006, catches corruption completeness checks miss) — note it drops the
-  frame for **every** consumer including cueing, so leave it off until a live run
-  confirms the camera reports CRC cleanly.
+  `frame.metadata`. `chunk_crc` (**default on**) **flags** CRC-failed frames
+  (`metadata["crc_ok"]=False`, counted in `get_health` as `crc_failed_count`) but
+  still **delivers** them — the consumer decides whether to skip, so a
+  false-positive CRC can't starve the pipeline. Catches corruption that
+  completeness checks miss; negligible cost (chunk mode is already active).
 - **Reliability (HARDWARE-VALIDATION-PENDING)** — `soft_reset_on_fault` issues a
   `DeviceReset` before reconnecting (un-wedges a stuck camera without a physical
   unplug); `read_retry_on_fault: N` retries a non-fatal `GetNextImage` error N
@@ -499,7 +500,7 @@ The commented `config/bfs_u3_16s2c.yaml` is the inline twin of this table.
 
 | Field | Default | What it does · when to use |
 |---|---|---|
-| `chunk_crc` | `false` | Enable the per-frame CRC chunk and reject CRC-failed frames as malformed (NFR-006) — catches corruption completeness checks miss. **Risk:** drops *upstream of the fan-out*, so a false-positive starves **cueing** too — enable only after a live run confirms clean CRC. |
+| `chunk_crc` | `true` | Per-frame CRC chunk. A CRC-failed frame is **flagged** (`metadata["crc_ok"]=False`, counted as `crc_failed_count` in `get_health`) but still **delivered** — the consumer decides whether to skip it, so a false-positive **can't starve** cueing. Catches corruption completeness checks miss; negligible cost. |
 | `chunk_telemetry` | `true` | **(default on)** Per-frame *actual* exposure/gain/black-level in `frame.metadata`. Purely additive (delivered frames unchanged), negligible cost. Opt out with `false`. |
 
 **Reliability** — opt-in; **HARDWARE-VALIDATION-PENDING**

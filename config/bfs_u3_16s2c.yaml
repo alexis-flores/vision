@@ -70,3 +70,36 @@ timestamp_sync: false             # bool. false = unchanged path (device hw_time
                                   # (TimestampLatch/TimestampLatchValue) and tag each frame's
                                   # metadata["host_capture_time_s"] on the host monotonic timebase,
                                   # for correlating frames to host events / other cameras.
+
+# --- Host color correction (raw-Bayer debayer has no ISP -> slight green cast) -
+white_balance: none               # none | gray_world | ccm.  none = unchanged (validated path).
+                                  # gray_world = cheap numpy per-channel gain (kills the green
+                                  # cast; illuminant-agnostic). ccm = Spinnaker color-correction
+                                  # matrix for the sensor (colorimetric; per-frame cost). Color is
+                                  # cosmetic for cueing; mainly improves the GUI preview.
+ccm_color_temp: LED_4649K         # CCM illuminant (white_balance=ccm only). IMX273 supports:
+                                  # INCANDESCENT_2765K, HALOGEN_3188K, FLUORESCENT_4665K,
+                                  # LED_4649K, LED_H_AND_E_4649K, DAYLIGHT_5034K,
+                                  # DAYLIGHT_H_AND_E_5034K. Unsupported -> CCM disabled at connect.
+color_algorithm: HQ_LINEAR        # debayer algo: HQ_LINEAR (default) | RIGOROUS |
+                                  # WEIGHTED_DIRECTIONAL_FILTER | ... (higher = better but slower).
+host_gamma: null                  # float | null. Optional HOST gamma on color frames (e.g. 0.8).
+                                  # Distinct from the device Gamma node (set_config("gamma")).
+
+# --- Chunk data (per-frame device metadata; default = FrameID + Timestamp only) -
+chunk_crc: false                  # bool. Enable the per-frame CRC chunk and reject CRC-failed
+                                  # frames as malformed (NFR-006) — catches corruption that
+                                  # incompleteness checks miss.
+chunk_telemetry: true             # bool (DEFAULT ON). Enable Exposure/Gain/BlackLevel chunks ->
+                                  # the device's ACTUAL per-frame values in frame.metadata
+                                  # (chunk_* keys). Purely additive; frames delivered are unchanged.
+
+# --- Reliability knobs (opt-in; HARDWARE-VALIDATION-PENDING) -------------------
+soft_reset_on_fault: false        # bool. On a backend fault, issue a DeviceReset (reboot the
+                                  # camera) before reconnecting -> recovers a wedged-but-present
+                                  # device without a physical unplug.
+read_retry_on_fault: 0            # int >= 0. Retry GetNextImage this many times on a NON-fatal,
+                                  # non-timeout error before declaring a fault (0 = fault at once).
+                                  # Device-fatal codes (removed/aborted) never retry.
+packet_resend: false              # bool. Enable stream packet retransmission (largely a GEV
+                                  # feature; usually a no-op / absent node on USB3).

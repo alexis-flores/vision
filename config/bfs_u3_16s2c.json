@@ -16,5 +16,17 @@
   "resolution": [1440, 1080],
   "fps": 60.0,
   "exposure_us": 5000.0,
-  "gain_db": 0.0
+  "gain_db": 0.0,
+  "stream_buffer_count": null,
+  "link_throughput_limit_bps": null,
+  "timestamp_sync": false,
+  "white_balance": "none",
+  "ccm_color_temp": "LED_4649K",
+  "color_algorithm": "HQ_LINEAR",
+  "host_gamma": null,
+  "chunk_crc": false,
+  "chunk_telemetry": true,
+  "soft_reset_on_fault": false,
+  "read_retry_on_fault": 0,
+  "packet_resend": false
 }

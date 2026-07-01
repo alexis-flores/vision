@@ -26,6 +26,12 @@ mutants/
 Spinnaker/
 Spinnaker-Examples-main/
 Spinnaker_Download/
+# Vendor PySpin wrapper + docs (reference). NOTE: a PySpin.py in the repo root
+# SHADOWS the installed SDK on `import PySpin` from here — keep it out of the tree
+# (move to a non-import-path dir) if you hit import issues.
+PySpin.py
+PySpinDoc.pdf
+Spinnaker-Python-Programmer-Guide.pdf
 
 # draw.io autosave backups
 *.drawio.bkp

@@ -273,13 +273,17 @@ class CameraService:
                 continue
             except CameraError as e: # backend fault
                 log.error("Backend fault on %r: %s", name, e)
-                if not self._attempt_reconnect(name, entry):
-                    log.error("Reconnect abandoned for %r; worker idling",
-                              name)
-                    # Do not raise; wait for shutdown (5.3 "log error and wait")
-                    entry.stop_evt.wait(self.RECONNECT_DELAY_S)
+                # NFR-005: keep attempting reconnect in bounded bursts until it
+                # succeeds or shutdown is requested. A camera may be replugged
+                # much later, so an exhausted burst starts another rather than
+                # giving up (each burst backs off internally, so no tight loop).
+                while not self._attempt_reconnect(name, entry):
                     if entry.stop_evt.is_set():
                         break
+                    log.error("Reconnect burst exhausted for %r; retrying "
+                              "until it returns (or shutdown)", name)
+                if entry.stop_evt.is_set():
+                    break
                 continue
 
             with entry.sink_lock:
@@ -305,6 +309,16 @@ class CameraService:
                     attempt > self.MAX_RECONNECT_ATTEMPTS):
                 return False
             log.warning("Reconnect attempt %d for %r", attempt, name)
+            # Opt-in (soft_reset_on_fault): on the first attempt, try a device
+            # reset to un-wedge a still-present camera before the reconnect
+            # cycle. Default backends no-op. Never raises out of here.
+            if attempt == 1:
+                try:
+                    if driver.soft_reset():
+                        log.warning("Issued device soft-reset for %r before "
+                                    "reconnect", name)
+                except Exception:
+                    log.debug("soft_reset raised for %r; continuing", name)
             try:
                 driver.disconnect()
             except CameraError:

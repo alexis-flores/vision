@@ -29,13 +29,14 @@ import time
 from typing import Callable, Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (QLabel, QMainWindow, QSizePolicy, QStatusBar,
                              QVBoxLayout, QWidget)
 
-from vision.camera_types import CameraFrame
+from vision.camera_types import CameraFrame, PixelFormat
 from vision.frame_buffers import FIFOFrameBuffer
+from vision.image_ops import gray_world_balance
 
 GUI_POLL_MS = 33        # ~30 FPS visualization (SRS 5.4)
 STATS_REFRESH_S = 0.5   # recompute FPS / read health+stats at ~2 Hz (cheap path)
@@ -53,8 +54,17 @@ StatsFn = Callable[[], dict]
 
 
 def frame_to_qimage(frame: CameraFrame) -> QImage:
-    """Convert a CameraFrame ndarray to QImage (mono or BGR)."""
-    data = np.ascontiguousarray(frame.data)
+    """Convert a CameraFrame to QImage, honouring its pixel_format so RGB8 and
+    BGR8 (and mono) render with the right channel order."""
+    return ndarray_to_qimage(frame.data,
+                             rgb=frame.pixel_format == PixelFormat.RGB8)
+
+
+def ndarray_to_qimage(data: np.ndarray, rgb: bool = False) -> QImage:
+    """Convert an (H,W) mono or (H,W,3) colour ndarray to a QImage (deep-copied).
+    `rgb` picks RGB888 vs BGR888 for 3-channel data (default BGR — the pipeline's
+    usual output_pixel_format; the driver emits BGR8 for the BFS)."""
+    data = np.ascontiguousarray(data)
     if data.ndim == 2:  # mono
         if data.dtype != np.uint8:  # e.g. Mono16
             data = (data >> (data.itemsize * 8 - 8)).astype(np.uint8)
@@ -66,9 +76,9 @@ def frame_to_qimage(frame: CameraFrame) -> QImage:
         # copy. Hence the targeted call-overload ignore.
         return QImage(data.data, w, h, w,  # type: ignore[call-overload]
                       QImage.Format.Format_Grayscale8).copy()
-    h, w, ch = data.shape  # color, assume BGR
-    return QImage(data.data, w, h, ch * w,  # type: ignore[call-overload]
-                  QImage.Format.Format_BGR888).copy()
+    h, w, ch = data.shape  # colour
+    fmt = QImage.Format.Format_RGB888 if rgb else QImage.Format.Format_BGR888
+    return QImage(data.data, w, h, ch * w, fmt).copy()  # type: ignore[call-overload]
 
 
 class CameraViewer(QMainWindow):
@@ -91,12 +101,19 @@ class CameraViewer(QMainWindow):
                  poll_ms: int = GUI_POLL_MS,
                  health_fn: Optional[HealthFn] = None,
                  stats_fn: Optional[StatsFn] = None,
-                 logo_path: Optional[str] = None) -> None:
+                 logo_path: Optional[str] = None,
+                 display_white_balance: bool = True) -> None:
         super().__init__()
         self.setWindowTitle(title)
         self._fifo = fifo
         self._health_fn = health_fn
         self._stats_fn = stats_fn
+        # Display-only white balance: correct the raw-Bayer green cast for the
+        # PREVIEW without touching the shared frame or the cueing path (this
+        # viewer receives its own frame; the correction is applied to a copy on
+        # the way to the screen). On already-balanced sources (webcam/sim) it is
+        # ~a no-op. Off => show pixels exactly as delivered.
+        self._display_wb = display_white_balance
 
         # FPS / telemetry state (cached; refreshed ~2 Hz)
         self._frames_shown = 0
@@ -140,17 +157,21 @@ class CameraViewer(QMainWindow):
         self._hud.move(self.HUD_MARGIN, self.HUD_MARGIN)
         self._hud.hide()
 
-        # Brand logo overlay (top-right), balancing the top-left HUD. It sits on
-        # the same subtle translucent panel as the HUD so it reads over any
-        # frame. Stays hidden unless a readable image exists at `logo_path`
-        # (default: assets/logo.png) — a missing file is a silent no-op.
+        # Brand logo overlay (top-right), balancing the top-left HUD. The image
+        # is drawn directly over the video with a transparent background (no
+        # panel), so only the logo's own pixels show. Stays hidden unless a
+        # readable image exists at `logo_path` (default: assets/logo.png) — a
+        # missing file is a silent no-op.
         self._logo = QLabel(self._label)
         self._logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._logo.setStyleSheet(
-            "QLabel { background-color: rgba(0, 0, 0, 140);"
-            " padding: 6px; border-radius: 6px; }")
+        self._logo.setStyleSheet("QLabel { background: transparent; }")
         self._logo.hide()
         self._load_logo(logo_path or LOGO_PATH)
+        # Track the VIDEO LABEL's own resizes (not the window's) so the logo
+        # re-pins on the initial layout settle too — at construction/first show
+        # the label has no final width yet, so positioning off it here would land
+        # the logo mid-top.
+        self._label.installEventFilter(self)
 
         self._statusbar = QStatusBar()    # kept as a typed ref (statusBar()->Optional)
         self.setStatusBar(self._statusbar)  # bottom: per-frame + bookkeeping detail
@@ -173,8 +194,15 @@ class CameraViewer(QMainWindow):
         if frame is None:
             return
 
+        # Display-only white balance (a copy; never mutates the shared frame).
+        # Gray-world is channel-order-agnostic, so it's applied before the
+        # RGB/BGR format is chosen.
+        data = frame.data
+        if self._display_wb and data.ndim == 3:
+            data = gray_world_balance(data)
         # Scale to the current label size, preserving aspect ratio (no stretch).
-        pixmap = QPixmap.fromImage(frame_to_qimage(frame))
+        rgb = frame.pixel_format == PixelFormat.RGB8
+        pixmap = QPixmap.fromImage(ndarray_to_qimage(data, rgb=rgb))
         self._label.setPixmap(pixmap.scaled(
             self._label.size(), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation))
@@ -265,9 +293,13 @@ class CameraViewer(QMainWindow):
         self._logo.move(max(self.HUD_MARGIN, x), self.HUD_MARGIN)
         self._logo.raise_()
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._reposition_logo()
+    def eventFilter(self, obj, event) -> bool:
+        # The video label's resize (incl. the first-show layout settle) is the
+        # reliable signal that its width is final — re-pin the logo top-right
+        # then. The window's own resizeEvent fires too early (label not yet sized).
+        if obj is self._label and event.type() == QEvent.Type.Resize:
+            self._reposition_logo()
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _safe_call(fn: Optional[Callable[[], dict]]) -> dict:

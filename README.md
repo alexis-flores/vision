@@ -174,6 +174,7 @@ apply only to a single-camera setup; with a multi-camera config they're ignored
 | `--seconds N` | `10.0` | headless run duration (seconds) |
 | `--inject-faults` | off | sim only: inject malformed frames + a crash to demo NFR-006/NFR-005 |
 | `--no-cueing` | off | don't start the cueing consumer; serve frames to the GUI only (display-only acquisition) |
+| `--no-display-wb` | off | disable the GUI's display-only white balance (preview shows raw pixels; cueing is unaffected either way) |
 | `--reset` | off | spinnaker only: load the factory Default user set, set it as the power-on default, then exit |
 | `--rt` | off | real-time mode: freeze + disable GC during the run and raise the camera worker(s) to `SCHED_FIFO` (Linux, needs root) for low-jitter frame timing |
 
@@ -218,7 +219,11 @@ python hardware_acceptance.py --mono --no-hw-timestamp        # mono / no device
 | `--max-saturated R` | `0.10` | max saturated-pixel fraction (not blown out) |
 | `--max-temperature C` | `75.0` | device temperature ceiling (°C) |
 | `--cycles N` | `0` | also run N connect/stream/teardown cycles (0 = skip) |
-| `--frames-per-cycle N` | `5` | frames read per cycle (with `--cycles`) |
+| `--frames-per-cycle N` | `5` | frames read per cycle (with `--cycles` / `--stress-reconnect`) |
+| `--stress-reconnect N` | `0` | STRESS: N mid-stream interrupt/recover cycles (automated NFR-005; 0 = skip) |
+| `--stress-bandwidth BPS` | off | STRESS: squeeze `DeviceLinkThroughputLimit` to BPS to provoke drops and verify graceful degradation (non-persisted) |
+
+> `--seconds` doubles as the **soak** knob for endurance (e.g. `--seconds 3600` for a 1-hour run). All three stress options are opt-in and safe (non-destructive); see "Automated acceptance testing" below.
 
 ### Tests
 
@@ -238,8 +243,13 @@ python -m unittest tests.test_acceptance
 python -m unittest tests.test_camera_service.TestCameraService
 python -m unittest tests.test_camera_service.TestCameraService.test_malformed_skip
 
-# run the real-hardware smoke test on the rig (must say "Ran 1 test", not skipped):
-python tests/test_hardware.py TestSpinnakerHardware -v
+# run the hardware tests on the rig (with a camera attached). HW-001 = basic
+# BGR8 capture; HW-002 (TestSpinnakerFeaturesHW) = one pass per opt-in feature
+# (timestamp_sync, chunk telemetry/CRC, CCM/gray-world, RGB8, packet_resend,
+# read_retry, health) so you can confirm everything new works in one command:
+PYTHONPATH=src /usr/bin/python3.10 -m unittest discover -s tests -p test_hardware.py -v
+#   VISION_TEST_SERIAL=<sn>       bind a specific unit (else index 0)
+#   VISION_TEST_SOFT_RESET=1      also run the disruptive DeviceReset recovery check
 
 # pytest equivalents (needs [dev]):
 pytest                                            # all
@@ -257,7 +267,7 @@ pytest tests/test_camera_service.py::TestCameraService::test_malformed_skip
 | `tests/test_acceptance.py` | acceptance check matrix (pure) + simulator + cycle/stress | core |
 | `tests/test_drivers_mocked.py` | Spinnaker/OpenCV driver logic via fake SDKs | core |
 | `tests/test_gui.py` | offscreen PyQt viewer | `[gui]` (PyQt6) |
-| `tests/test_hardware.py` | real-SDK tests (no camera) + HW-001 smoke (camera) | PySpin / camera |
+| `tests/test_hardware.py` | real-SDK tests (no camera) + HW-001 basic-capture smoke + HW-002 opt-in-feature smoke (camera) | PySpin / camera |
 
 ### Coverage & static checks (with `[dev]`)
 ```bash
@@ -387,7 +397,118 @@ What to set / tune for your rig:
   camera whose consumer only needs frame order/freshness (device `hw_timestamp_ns`
   is still always present).
 
+**Opt-in enhancements (all default-off; the validated path is unchanged unless
+set — see the commented `.yaml` twin for the full field docs):**
+
+- **Color** — the raw-Bayer→BGR debayer bypasses the on-camera ISP, so frames
+  carry a slight green/yellow cast. **The live viewer already corrects this for
+  the *preview* by default** (a gray-world balance applied only to the displayed
+  copy — the shared frame and the cueing path are untouched; disable with
+  `--no-display-wb`). To instead bake correction into the *captured* frame for
+  **all** consumers, set `white_balance: gray_world` (cheap numpy, illuminant-
+  agnostic) or `ccm` (Spinnaker color-correction matrix for the IMX273; set
+  `ccm_color_temp` to a **supported** preset — `LED_4649K`, `DAYLIGHT_5034K`,
+  `HALOGEN_3188K`, … — an unsupported one is detected at connect and disabled).
+  Plus `color_algorithm` (`HQ_LINEAR` default; `RIGOROUS` etc. higher-quality/
+  slower) and `host_gamma`. Color is cosmetic for cueing (intensity-based).
+- **Integrity / telemetry** — `chunk_telemetry` (**default on**; purely additive)
+  puts the device's actual per-frame exposure/gain/black-level in
+  `frame.metadata`. `chunk_crc` (opt-in) rejects CRC-failed frames as malformed
+  (NFR-006, catches corruption completeness checks miss) — note it drops the
+  frame for **every** consumer including cueing, so leave it off until a live run
+  confirms the camera reports CRC cleanly.
+- **Reliability (HARDWARE-VALIDATION-PENDING)** — `soft_reset_on_fault` issues a
+  `DeviceReset` before reconnecting (un-wedges a stuck camera without a physical
+  unplug); `read_retry_on_fault: N` retries a non-fatal `GetNextImage` error N
+  times before faulting (device-fatal codes never retry); `packet_resend` enables
+  stream retransmission (largely a GEV feature; usually a no-op on USB3).
+
 The **C-to-CS adapter** is a physical part — see the optics note above.
+
+### Full configuration reference (every config-file knob)
+
+Complete list of every `CameraConfig` field, with defaults and when to use each.
+The commented `config/bfs_u3_16s2c.yaml` is the inline twin of this table.
+
+**Identity & selection**
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `name` | `"camera"` | Service key, `frame.camera_name`, log/HUD label. Must be **unique** across a multi-camera config. |
+| `model` | `"unknown"` | Advisory label only (printed when the config loads). |
+| `serial` | `null` | The unit's serial (as spinview shows). Binds to a **specific physical camera** and is **required for reliable reconnect (NFR-005)** — without it, selection falls back to `device_index`, which can shuffle across a USB re-enumeration. Set it on any real rig. |
+| `device_index` | `0` | Enumeration-index fallback when `serial` is null (also the OpenCV device index). Only matters with multiple cameras and no serial. |
+
+**Sensor characteristics** — advisory (drive `validate()`/docs, *not* sent to the camera)
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `max_resolution` | `[1920,1080]` | Sensor max `[w,h]`; sets `max_pixel_count` + the default `resolution`. BFS: `[1440,1080]`. |
+| `max_fps` | `30.0` | Sensor max rate; default `fps` + `validate()` only. BFS: `226.0`. |
+| `bit_depth` | `8` | ADC bit depth (advisory). BFS: `12`. |
+| `dynamic_range_db` | `null` | Advisory spec. |
+| `sensor_format` | `null` | e.g. `1/2.9"` (advisory). |
+| `lens_fov_deg` | `null` | Horizontal FOV of the mounted lens; `validate()` warns if below the NFR-004 minimum (30°). |
+| `focal_length_mm` | `null` | Advisory (lens.py takes focal length as a call arg). |
+
+**Capability mask**
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `features` | `[]` | Which attributes `set_config()` may write **and** which acquisition fields are applied at connect. Subset of `GAIN, EXPOSURE, FRAME_RATE, RESOLUTION, PIXEL_FORMAT, WHITE_BALANCE, GAMMA, BLACK_LEVEL, TRIGGER, BINNING, ROI`. |
+
+**Acquisition** — applied to the camera at connect
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `resolution` | `= max_resolution` | `[w,h]` → Width/Height (needs `RESOLUTION`; ROI offset reset to 0 first). Clamped to device limits. |
+| `fps` | `= max_fps` | → AcquisitionFrameRate (needs `FRAME_RATE`). Clamped to the exposure-limited range; **sets the `exposure_us` ceiling** (≤ 1e6/fps). |
+| `exposure_us` | `null` | → ExposureTime, sets ExposureAuto=Off (needs `EXPOSURE`). **Main brightness knob.** Must be ≤ 1/fps (≤ 16,600 µs @ 60 fps). |
+| `gain_db` | `null` | → Gain, sets GainAuto=Off (needs `GAIN`). Raise only if still dark at max usable exposure — **tradeoff: adds noise.** |
+
+**Pixel format**
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `device_pixel_format` | `null` | What the **camera transmits**. `BayerRG8` = native color, 1 byte/px → **low USB bandwidth** (host debayers). null = leave the device's current format. |
+| `output_pixel_format` | `BGR8` | What the host converts each frame **to** (`BGR8`/`RGB8`/`Mono8`/`Mono16`/`BayerRG8`). Honored end-to-end, including the GUI channel order. |
+
+**Bandwidth / buffering** — multi-camera USB3 rigs (single camera: leave null)
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `stream_buffer_count` | `null` | StreamBufferCountManual. Raise to absorb bursts when cameras share a USB3 controller and drop frames. **Tradeoff:** more host memory. Watch `StreamLost/DroppedFrameCount` in `get_health()`. |
+| `link_throughput_limit_bps` | `null` | DeviceLinkThroughputLimit (Bytes/s). **THE knob to partition a shared USB3 bus** — give each camera a slice summing under controller capacity. ~93 MB/s = 1440×1080 BayerRG8 @60fps. Below the fps need lowers the achievable rate. |
+
+**Host color correction** — opt-in; fixes the raw-Bayer green/yellow cast (color is cosmetic for cueing)
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `white_balance` | `"none"` | `none`/`gray_world`/`ccm`. **gray_world** = cheap numpy per-channel gain (illuminant-agnostic; can over-correct a strongly one-colour scene). **ccm** = colorimetric matrix (per-frame SDK cost — watch `resulting_fps`). Bakes into the captured frame for **all** consumers; for **preview-only** correction leave `none` and rely on the GUI's display WB. |
+| `ccm_color_temp` | `LED_4649K` | CCM illuminant preset (ccm only). IMX273 supports `LED_4649K`, `DAYLIGHT_5034K`, `HALOGEN_3188K`, `INCANDESCENT_2765K`, `FLUORESCENT_4665K` (+`_H_AND_E`). Unsupported → CCM disabled at connect. Pick nearest your lighting. |
+| `color_algorithm` | `HQ_LINEAR` | Debayer algorithm. `HQ_LINEAR` is balanced; `RIGOROUS`/`WEIGHTED_DIRECTIONAL_FILTER` are higher quality but **slower** (measure `resulting_fps`). Unknown value → falls back to `HQ_LINEAR`. |
+| `host_gamma` | `null` | Host gamma (`ApplyGamma`) on color frames, e.g. `0.8`. Distinct from the **device** Gamma node (`set_config("gamma")`). |
+
+**Timestamps**
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `timestamp_sync` | `false` | Latch device→host clock at connect; tags `frame.metadata["host_capture_time_s"]` on the host monotonic timebase. Use to **correlate frames to host events / other cameras**. `hw_timestamp_ns` is present regardless. |
+
+**Integrity & diagnostics**
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `chunk_crc` | `false` | Enable the per-frame CRC chunk and reject CRC-failed frames as malformed (NFR-006) — catches corruption completeness checks miss. **Risk:** drops *upstream of the fan-out*, so a false-positive starves **cueing** too — enable only after a live run confirms clean CRC. |
+| `chunk_telemetry` | `true` | **(default on)** Per-frame *actual* exposure/gain/black-level in `frame.metadata`. Purely additive (delivered frames unchanged), negligible cost. Opt out with `false`. |
+
+**Reliability** — opt-in; **HARDWARE-VALIDATION-PENDING**
+
+| Field | Default | What it does · when to use |
+|---|---|---|
+| `soft_reset_on_fault` | `false` | On a fault, issue a `DeviceReset` (reboot the camera) before reconnecting — recovers a **wedged-but-present** camera without a physical unplug. **Tradeoff:** a reset costs seconds, so it's *worse* for ordinary transient faults; enable for **unattended rigs** or observed wedging. |
+| `read_retry_on_fault` | `0` | Retry a **non-fatal**, non-timeout `GetNextImage` error N times before faulting (device-fatal codes never retry). Rides out a brief blip without a full reconnect. **Tradeoff:** blocks the worker up to (N+1)×timeout. |
+| `packet_resend` | `false` | Enable stream packet retransmission. Genuine benefit on **GEV**; usually a no-op / absent node on **USB3**. |
 
 ### Scaling to a multi-camera rig & low-jitter tuning
 

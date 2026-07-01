@@ -76,6 +76,33 @@ class TestCameraViewer(unittest.TestCase):
         self.assertIn("10.0 ms", hud)      # exposure value (10000 us -> 10.0 ms)
         self.assertIn("frame 1", win.statusBar().currentMessage())
 
+    def test_display_white_balance_default_on_renders(self):
+        # Display WB is on by default and renders a color frame without touching
+        # the source frame (correction is applied to a copy for the screen).
+        fifo = FIFOFrameBuffer(4)
+        fifo.push(_frame(1, color=True))
+        win = gui_bridge.CameraViewer(fifo, poll_ms=10)
+        self.assertTrue(win._display_wb)
+        self._run(win, ms=120)
+        self.assertGreaterEqual(win._frames_shown, 1)
+        win.close()
+
+    def test_pixel_format_selects_channel_order(self):
+        # The viewer honours the frame's pixel_format: RGB8 -> RGB888,
+        # BGR8 (and unset) -> BGR888. Makes output_pixel_format functional E2E.
+        from PyQt6.QtGui import QImage
+
+        from vision.camera_types import PixelFormat
+        data = np.zeros((4, 4, 3), np.uint8)
+        rgb = CameraFrame(data=data, timestamp=time.monotonic(), frame_id=1,
+                          pixel_format=PixelFormat.RGB8)
+        bgr = CameraFrame(data=data, timestamp=time.monotonic(), frame_id=2,
+                          pixel_format=PixelFormat.BGR8)
+        self.assertEqual(gui_bridge.frame_to_qimage(rgb).format(),
+                         QImage.Format.Format_RGB888)
+        self.assertEqual(gui_bridge.frame_to_qimage(bgr).format(),
+                         QImage.Format.Format_BGR888)
+
     def test_logo_absent_is_hidden(self):
         # No image at the path -> logo overlay stays hidden (silent no-op).
         win = gui_bridge.CameraViewer(
@@ -84,17 +111,21 @@ class TestCameraViewer(unittest.TestCase):
         win.close()
 
     def test_logo_present_is_shown_top_right(self):
-        # A readable image -> logo overlay is shown and pinned to the top-right.
+        # A readable image -> logo overlay shown and pinned to the top-right at
+        # the DEFAULT window size on first show (regression: it must not land
+        # mid-top because the label wasn't laid out yet at construction).
         import tempfile
         from PyQt6.QtGui import QImage
         path = os.path.join(tempfile.mkdtemp(), "logo.png")
         QImage(64, 24, QImage.Format.Format_RGBA8888).save(path)
         win = gui_bridge.CameraViewer(FIFOFrameBuffer(2), logo_path=path)
-        win.resize(800, 600)
-        win.show()
+        self._run(win, ms=100)             # show + let the initial layout settle
         self.assertFalse(win._logo.isHidden())
-        # right edge sits within the video area, past the horizontal midpoint
+        # right edge sits past the horizontal midpoint of the video area, and the
+        # logo doesn't overflow it
         self.assertGreater(win._logo.x(), win._label.width() // 2)
+        self.assertLessEqual(win._logo.x() + win._logo.width(),
+                             win._label.width())
         win.close()
 
     def test_works_without_callbacks_and_mono(self):

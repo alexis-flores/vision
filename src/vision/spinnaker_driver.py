@@ -20,6 +20,7 @@ from .camera_driver import (CameraDriver, CameraError, CameraTimeoutError,
                            FeatureNotSupportedError, MalformedFrameError)
 from .camera_types import (CameraConfig, CameraFeature, CameraFrame,
                           CameraStatus, PixelFormat)
+from .image_ops import gray_world_balance
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class SpinnakerCameraDriver(CameraDriver):
         self._lost = False # device removed/aborted mid-stream (hot-unplug)
         self._ts_offset_s: Optional[float] = None # device->host clock offset
                                                   # (opt-in timestamp_sync)
+        self._ccm_settings: Any = None # PySpin.CCMSettings (opt-in white_balance=ccm)
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Lifecycle
@@ -69,21 +71,26 @@ class SpinnakerCameraDriver(CameraDriver):
                 cam_list.Clear()
                 raise CameraError("No Spinnaker cameras found")
 
-            if self.config.serial:
-                self._cam = cam_list.GetBySerial(self.config.serial)
-            else:
-                # Index-based selection is NOT stable across a USB
-                # re-enumeration (unplug/replug or backend crash), so reconnect
-                # (NFR-005) can bind to a stale/not-ready handle. Selecting by
-                # serial deterministically re-binds to the same physical unit.
-                log.warning(
-                    "Camera %r has no 'serial' configured; selecting by "
-                    "device_index=%d. Reconnect across USB re-enumeration "
-                    "(NFR-005) may be unreliable — set 'serial' in the config "
-                    "(or pass --serial) to bind to a specific unit.",
-                    self.config.name, self.config.device_index)
-                self._cam = cam_list.GetByIndex(self.config.device_index)
-            cam_list.Clear()
+            try:
+                if self.config.serial:
+                    self._cam = cam_list.GetBySerial(self.config.serial)
+                else:
+                    # Index-based selection is NOT stable across a USB
+                    # re-enumeration (unplug/replug or backend crash), so
+                    # reconnect (NFR-005) can bind to a stale/not-ready handle.
+                    # Selecting by serial deterministically re-binds to the same
+                    # physical unit.
+                    log.warning(
+                        "Camera %r has no 'serial' configured; selecting by "
+                        "device_index=%d. Reconnect across USB re-enumeration "
+                        "(NFR-005) may be unreliable — set 'serial' in the config "
+                        "(or pass --serial) to bind to a specific unit.",
+                        self.config.name, self.config.device_index)
+                    self._cam = cam_list.GetByIndex(self.config.device_index)
+            finally:
+                # Always clear the list, even if selection raised, so it can't
+                # outlive its camera and error at ReleaseInstance().
+                cam_list.Clear()
 
             self._cam.Init()
             self._init_processor()
@@ -128,6 +135,17 @@ class SpinnakerCameraDriver(CameraDriver):
                     log.debug("stop_stream during disconnect: %s", e)
         if self._cam is not None:
             if not lost:
+                # Diagnostic: images must be Release()d before teardown. A
+                # non-zero count means a consumer is holding a frame past
+                # release, which would otherwise error at ReleaseInstance().
+                try:
+                    in_use = self._cam.GetNumImagesInUse()
+                    if in_use:
+                        log.warning("Disconnecting with %d image(s) still in "
+                                    "use — a consumer is holding a frame "
+                                    "reference past its release", in_use)
+                except Exception as e:  # never let a diagnostic block teardown
+                    log.debug("GetNumImagesInUse failed: %s", e)
                 try:
                     self._cam.DeInit()
                 except Exception as e:  # cleanup must never raise
@@ -207,6 +225,29 @@ class SpinnakerCameraDriver(CameraDriver):
         except PySpin.SpinnakerException as e:
             raise CameraError(f"Reset to defaults failed: {e}") from e
 
+    def soft_reset(self) -> bool:
+        """Opt-in DeviceReset (config.soft_reset_on_fault): reboot the camera to
+        recover a wedged-but-present device without a physical unplug. The device
+        re-enumerates like a hot-unplug, so we flag it lost — teardown then skips
+        EndAcquisition/DeInit on the now-dead handle (avoiding a native SIGSEGV)
+        and the caller reconnects by serial once it reappears. No-op unless opted
+        in with a live (non-lost) handle."""
+        if not self.config.soft_reset_on_fault \
+                or self._cam is None or self._lost:
+            return False
+        node = getattr(self._cam, "DeviceReset", None)
+        if node is None:
+            return False
+        try:
+            node.Execute()
+            self._lost = True  # re-enumeration -> dead handle; skip native cleanup
+            log.info("DeviceReset issued for %r; camera will re-enumerate",
+                     self.config.name)
+            return True
+        except self._pyspin.SpinnakerException as e:
+            log.debug("DeviceReset failed: %s", e)
+            return False
+
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Frames
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
@@ -216,40 +257,53 @@ class SpinnakerCameraDriver(CameraDriver):
         PySpin = self._pyspin
         timeout_ms = (PySpin.EVENT_TIMEOUT_INFINITE if timeout is None
                       else max(1, int(timeout * 1000)))
-        try:
-            img = self._cam.GetNextImage(timeout_ms)
-        except PySpin.SpinnakerException as e:
-            # Only a genuine timeout is a CameraTimeoutError (service retries).
-            # Any other GetNextImage failure (e.g. device disconnected) is a
-            # backend fault, which must trigger NFR-005 reconnect.
-            timeout_code = getattr(PySpin, "SPINNAKER_ERR_TIMEOUT", -1011)
-            if getattr(e, "errorcode", None) == timeout_code:
-                raise CameraTimeoutError(
-                    f"No frame within {timeout}s: {e}") from e
-            # Non-timeout GetNextImage failure means the stream was aborted /
-            # the device was removed (e.g. hot-unplug, ERR -1012). The handle's
-            # transport is now dead: flag it so teardown SKIPS EndAcquisition /
-            # DeInit, which would otherwise dereference the removed device and
-            # SIGSEGV inside the SDK (a native crash Python cannot catch).
-            self._lost = True
-            raise CameraError(f"GetNextImage failed: {e}") from e
+        timeout_code = getattr(PySpin, "SPINNAKER_ERR_TIMEOUT", -1011)
+        fatal = self._fatal_error_codes()
+        retries = max(0, int(self.config.read_retry_on_fault))
+        while True:
+            try:
+                img = self._cam.GetNextImage(timeout_ms)
+                break
+            except PySpin.SpinnakerException as e:
+                # Only a genuine timeout is a CameraTimeoutError (service retries).
+                code = getattr(e, "errorcode", None)
+                if code == timeout_code:
+                    raise CameraTimeoutError(
+                        f"No frame within {timeout}s: {e}") from e
+                # Non-timeout. A device-fatal code (removed/aborted) — or an
+                # exhausted retry budget — means the handle's transport is dead:
+                # flag it so teardown SKIPS EndAcquisition/DeInit, which would
+                # otherwise dereference the removed device and SIGSEGV inside the
+                # SDK. A NON-fatal transient with retry budget (opt-in
+                # read_retry_on_fault; default 0) is retried in place first.
+                if code not in fatal and retries > 0:
+                    retries -= 1
+                    log.warning("GetNextImage transient error (%s); retrying "
+                                "(%d left)", e, retries)
+                    continue
+                self._lost = True
+                raise CameraError(f"GetNextImage failed: {e}") from e
 
         try:
             if img.IsIncomplete():
                 raise MalformedFrameError(
                     f"Incomplete image: {self._image_status_text(img)}")
+            if self.config.chunk_crc and self._crc_failed(img):
+                raise MalformedFrameError(
+                    f"CRC check failed: {self._image_status_text(img)}")
             # Convert to the requested output format on the host. For color
             # cameras (e.g. BFS-U3-16S2C-CS, native BayerRG8) this debayers to
             # BGR8; for mono it is an inexpensive passthrough/copy.
             data = self._convert(img) # returns an owned copy
             hw_ts = img.GetTimeStamp() # ns, device clock
             device_fid = self._chunk_frame_id(img) # device counter (if chunk on)
+            chunk_meta = self._chunk_telemetry(img) # actual per-frame exp/gain
         finally:
             img.Release()
 
-        # Opt-in: tag the host-timebase capture time when timestamp_sync latched
-        # an offset. Empty dict otherwise => the default path is unchanged.
-        meta: dict = {}
+        # Opt-in metadata: host-timebase capture time (timestamp_sync) + per-frame
+        # chunk telemetry. Empty dict otherwise => the default path is unchanged.
+        meta: dict = dict(chunk_meta)
         host_t = self.device_to_host_time(hw_ts)
         if host_t is not None:
             meta["host_capture_time_s"] = host_t
@@ -261,9 +315,22 @@ class SpinnakerCameraDriver(CameraDriver):
             camera_name=self.config.name,
             hw_timestamp_ns=hw_ts,
             device_frame_id=device_fid,
-            pixel_format=self.config.output_pixel_format,
+            pixel_format=self._frame_pixel_format(data),
             metadata=meta,
         )
+
+    def _fatal_error_codes(self) -> frozenset:
+        """Resolved SPINNAKER_ERR_* codes meaning the device handle is dead
+        (removed/aborted/IO-failed) — never retried; always -> lost + reconnect.
+        Resolved by NAME (values differ across SDKs, so never hardcode them)."""
+        codes = []
+        for name in ("SPINNAKER_ERR_ABORT", "SPINNAKER_ERR_INVALID_HANDLE",
+                     "SPINNAKER_ERR_ACCESS_DENIED", "SPINNAKER_ERR_IO",
+                     "SPINNAKER_ERR_NOT_AVAILABLE"):
+            v = getattr(self._pyspin, name, None)
+            if v is not None:
+                codes.append(v)
+        return frozenset(codes)
 
     def _latch_timestamp_offset(self) -> None:
         """Latch the device clock against the host clock once to get a
@@ -330,6 +397,42 @@ class SpinnakerCameraDriver(CameraDriver):
             return int(fid) if fid is not None else None
         except Exception:  # chunk disabled/unsupported -> no device id
             return None
+
+    def _crc_failed(self, img) -> bool:
+        """True if the frame failed its CRC check (opt-in chunk_crc). A CRC
+        failure can pass IsIncomplete() — the frame is 'complete' but corrupt —
+        so this is a distinct integrity gate. Best-effort: an unknown/absent
+        status counts as not-failed (never block delivery on uncertainty)."""
+        crc_bad = getattr(self._pyspin,
+                          "SPINNAKER_IMAGE_STATUS_CRC_CHECK_FAILED", None)
+        if crc_bad is None:
+            return False
+        try:
+            return img.GetImageStatus() == crc_bad
+        except Exception:
+            return False
+
+    def _chunk_telemetry(self, img) -> dict:
+        """Best-effort per-frame chunk metrics (the device's ACTUAL exposure /
+        gain / black level for THIS frame) as a dict; empty when chunk_telemetry
+        is off or the fields are absent. Never breaks frame delivery."""
+        if not self.config.chunk_telemetry:
+            return {}
+        out: dict = {}
+        try:
+            cd = img.GetChunkData()
+        except Exception:
+            return out
+        for key, getter in (("chunk_exposure_us", "GetExposureTime"),
+                            ("chunk_gain_db", "GetGain"),
+                            ("chunk_black_level", "GetBlackLevel")):
+            try:
+                fn = getattr(cd, getter, None)
+                if fn is not None:
+                    out[key] = float(fn())
+            except Exception as e:
+                log.debug("chunk %s read failed: %s", key, e)
+        return out
 
     # ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
     #   Configuration
@@ -406,7 +509,11 @@ class SpinnakerCameraDriver(CameraDriver):
         try:
             snm = cam.GetTLStreamNodeMap()
             for name in ("StreamLostFrameCount", "StreamDroppedFrameCount",
-                         "StreamIncompleteFrameCount", "StreamFailedBufferCount"):
+                         "StreamIncompleteFrameCount", "StreamFailedBufferCount",
+                         # packet-recovery counters (present on USB3/GEV that
+                         # support resend; guarded — absent nodes are skipped):
+                         "StreamPacketResendRequestCount",
+                         "StreamPacketResendReceivedPacketCount"):
                 val = self._read_int_node(snm, name)
                 if val is not None:
                     health[name] = val
@@ -454,18 +561,79 @@ class SpinnakerCameraDriver(CameraDriver):
         """
         PySpin = self._pyspin
         self._processor = None
+        self._ccm_settings = None
         if hasattr(PySpin, "ImageProcessor"):
             try:
                 proc = PySpin.ImageProcessor()
-                algo = getattr(
-                    PySpin,
-                    "SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR", None)
+                # Debayer algorithm (config-selectable; HQ_LINEAR default). An
+                # unknown name falls back to HQ_LINEAR so a typo can't break it.
+                algo = (getattr(PySpin,
+                                f"SPINNAKER_COLOR_PROCESSING_ALGORITHM_"
+                                f"{self.config.color_algorithm}", None)
+                        or getattr(PySpin,
+                                   "SPINNAKER_COLOR_PROCESSING_ALGORITHM_"
+                                   "HQ_LINEAR", None))
                 if algo is not None:
                     proc.SetColorProcessing(algo)
                 self._processor = proc
             except PySpin.SpinnakerException as e:
                 log.warning("ImageProcessor unavailable (%s); using legacy "
                             "img.Convert()", e)
+        self._ccm_settings = self._build_ccm_settings()
+
+    def _build_ccm_settings(self) -> Any:
+        """Build + VALIDATE a PySpin.CCMSettings for the sensor when
+        white_balance == 'ccm'. Returns None (→ no CCM, plain debayer) if the
+        config didn't opt in, the SDK lacks the CCM API, or the sensor rejects
+        the combination.
+
+        The IMX273 only accepts a narrow set of CCM combinations (verified: Type
+        LINEAR, Application MICROSCOPY, specific color temps); an unsupported
+        combo raises -1003 at conversion time and would otherwise silently
+        degrade every frame to raw Bayer. We therefore run a one-off trial
+        correction here and disable CCM cleanly if it's rejected."""
+        if self.config.white_balance != "ccm":
+            return None
+        PySpin = self._pyspin
+        if not hasattr(PySpin, "CCMSettings") \
+                or not hasattr(PySpin, "ImageUtilityCCM") \
+                or self._processor is None:
+            log.warning("white_balance=ccm requested but the CCM API is "
+                        "unavailable in this SDK; falling back to plain debayer")
+            return None
+        try:
+            s = PySpin.CCMSettings()
+            # The only combination the IMX273 supports on this SDK.
+            for attr, const in (
+                    ("Sensor", "SPINNAKER_CCM_SENSOR_IMX273"),
+                    ("Type", "SPINNAKER_CCM_TYPE_LINEAR"),
+                    ("ColorSpace", "SPINNAKER_CCM_COLOR_SPACE_SRGB"),
+                    ("Application", "SPINNAKER_CCM_APPLICATION_MICROSCOPY")):
+                val = getattr(PySpin, const, None)
+                if val is not None:
+                    setattr(s, attr, val)
+            temp = getattr(
+                PySpin,
+                f"SPINNAKER_CCM_COLOR_TEMP_{self.config.ccm_color_temp}", None)
+            if temp is None:
+                temp = getattr(PySpin, "SPINNAKER_CCM_COLOR_TEMP_LED_4649K", None)
+                log.warning("ccm_color_temp=%r not available; using LED_4649K",
+                            self.config.ccm_color_temp)
+            if temp is not None:
+                s.ColorTemperature = temp
+            # Trial-correct a tiny BGR8 image so an unsupported combo is caught
+            # now (clear warning) instead of degrading every captured frame.
+            probe_buf = np.zeros((4, 4, 3), np.uint8)
+            probe = PySpin.Image.Create(
+                4, 4, 0, 0, PySpin.PixelFormat_BGR8, probe_buf)
+            PySpin.ImageUtilityCCM.CreateColorCorrected(probe, s)
+            log.info("Host CCM enabled (IMX273, LINEAR/MICROSCOPY/sRGB, "
+                     "color_temp=%s)", self.config.ccm_color_temp)
+            return s
+        except PySpin.SpinnakerException as e:
+            log.warning("CCM combination not supported by the sensor (%s); "
+                        "falling back to plain debayer", e)
+            return None
 
     def _configure_acquisition(self) -> None:
         """Set acquisition mode and stream buffering for low-latency capture.
@@ -534,6 +702,22 @@ class SpinnakerCameraDriver(CameraDriver):
                              self.config.link_throughput_limit_bps)
                 except PySpin.SpinnakerException as e:
                     log.warning("Could not set DeviceLinkThroughputLimit: %s", e)
+        # Optional stream packet-resend recovery (opt-in). Guarded: this is
+        # largely a GEV feature and the node is often absent on USB3, so a
+        # missing/unwritable node is a silent no-op. get_health() surfaces the
+        # resend counters when present.
+        if self.config.packet_resend:
+            try:
+                snm = self._cam.GetTLStreamNodeMap()
+                node = PySpin.CBooleanPtr(snm.GetNode("StreamPacketResendEnable"))
+                if PySpin.IsAvailable(node) and PySpin.IsWritable(node):
+                    node.SetValue(True)
+                    log.info("StreamPacketResendEnable = True")
+                else:
+                    log.info("packet_resend requested but the node is "
+                             "unavailable (expected on USB3); skipping")
+            except PySpin.SpinnakerException as e:
+                log.warning("Could not enable packet resend: %s", e)
         self._enable_chunk_data()
 
     def _enable_chunk_data(self) -> None:
@@ -545,9 +729,15 @@ class SpinnakerCameraDriver(CameraDriver):
         PySpin = self._pyspin
         if not hasattr(self._cam, "ChunkModeActive"):
             return
+        # FrameID + Timestamp are the baseline; CRC / telemetry are opt-in.
+        chunks = ["FrameID", "Timestamp"]
+        if self.config.chunk_crc:
+            chunks.append("CRC")
+        if self.config.chunk_telemetry:
+            chunks += ["ExposureTime", "Gain", "BlackLevel"]
         try:
             self._cam.ChunkModeActive.SetValue(True)
-            for chunk in ("FrameID", "Timestamp"):
+            for chunk in chunks:
                 sel = getattr(PySpin, f"ChunkSelector_{chunk}", None)
                 if sel is None:
                     continue
@@ -588,10 +778,19 @@ class SpinnakerCameraDriver(CameraDriver):
         try:
             if self._processor is not None:
                 converted = self._processor.Convert(img, target)
+                try:
+                    converted = self._apply_color_pipeline(converted)
+                except Exception as e:  # CCM/gamma failure -> uncorrected BGR,
+                    log.warning(         # never fall all the way back to raw Bayer
+                        "Host color pipeline failed (%s); using uncorrected "
+                        "frame", e)
             else:
                 converted = img.Convert(target, getattr(PySpin, "HQ_LINEAR", 0))
             # copy before `converted` goes out of scope and frees its buffer
-            return np.array(converted.GetNDArray(), copy=True)
+            data = np.array(converted.GetNDArray(), copy=True)
+            if self.config.white_balance == "gray_world" and data.ndim == 3:
+                data = gray_world_balance(data)
+            return data
         except Exception as e:
             # Degrade to the raw device frame on ANY conversion failure, never
             # crash the worker (NFR-006). Besides SpinnakerException, the legacy
@@ -602,6 +801,36 @@ class SpinnakerCameraDriver(CameraDriver):
             log.warning("Pixel-format conversion failed (%s); using raw frame",
                         e)
             return np.array(img.GetNDArray(), copy=True)
+
+    def _frame_pixel_format(self, data) -> Optional[PixelFormat]:
+        """The format to LABEL a frame with: the configured output format when
+        the converted data matches it, else None. A conversion-failure fallback
+        returns the raw device array (e.g. 2-D Bayer), which is NOT the output
+        format — so we don't claim it is."""
+        pf = self.config.output_pixel_format
+        is_color = data.ndim == 3 and data.shape[2] == 3
+        wants_color = pf in (PixelFormat.BGR8, PixelFormat.RGB8)
+        return pf if is_color == wants_color else None
+
+    def _apply_color_pipeline(self, image):
+        """Opt-in host color correction on a converted COLOR image: CCM
+        (ImageUtilityCCM) and/or gamma (ImageProcessor.ApplyGamma). Returns the
+        corrected image, or the input unchanged when nothing opted in / the SDK
+        lacks the API. Raises are left to _convert's fallback (→ raw frame)."""
+        if self.config.output_pixel_format not in (PixelFormat.BGR8,
+                                                    PixelFormat.RGB8):
+            return image  # color ops are meaningless on mono
+        PySpin = self._pyspin
+        out = image
+        if self._ccm_settings is not None:
+            util = getattr(PySpin, "ImageUtilityCCM", None)
+            if util is not None:
+                out = util.CreateColorCorrected(out, self._ccm_settings)
+        gamma = self.config.host_gamma
+        if gamma and self._processor is not None \
+                and hasattr(self._processor, "ApplyGamma"):
+            out = self._processor.ApplyGamma(out, float(gamma))
+        return out
 
     def _await_ready(self, timeout_s: float = 2.0) -> None:
         """After Init() — especially on reconnect following a USB re-enumeration

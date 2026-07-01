@@ -58,6 +58,18 @@ class TestConfigLoader(unittest.TestCase):  # UT-001
         with self.assertRaises(ConfigError):
             load_camera_config(path)
 
+    def test_malformed_yaml_errors(self):  # error case: YAMLError -> ConfigError
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        os.write(fd, b"name: cam\n  bad: : indent")   # invalid YAML syntax
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        with self.assertRaises(ConfigError):          # not a raw yaml.YAMLError
+            load_camera_config(path)
+
     def test_unknown_feature_errors(self):  # error case
         path = self._write({"name": "x", "features": ["NOT_A_FEATURE"]})
         with self.assertRaises(ConfigError):

@@ -75,3 +75,11 @@ extend-exclude = ["Spinnaker", "Spinnaker-Examples-main"]
 [tool.mypy]
 files = ["src/vision", "app.py", "gui_bridge.py", "hardware_acceptance.py"]
 ignore_missing_imports = true   # PySpin / cv2 / cupy ship no stubs
+
+# Treat PySpin as an opaque, untyped module. It ships no stubs, and if a copy of
+# the SWIG wrapper (PySpin.py) is dropped in the tree for reference, mypy must
+# NOT analyse it (it uses package-relative imports that fail as a top-level file).
+[[tool.mypy.overrides]]
+module = ["PySpin", "PySpin.*"]
+follow_imports = "skip"
+ignore_missing_imports = true

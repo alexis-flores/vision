@@ -84,6 +84,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--no-cueing", action="store_true",
                     help="don't start the cueing consumer; only serve frames to "
                          "the GUI (FIFO) — display-only acquisition")
+    ap.add_argument("--no-display-wb", action="store_true",
+                    help="disable the GUI's display-only white balance (preview "
+                         "shows raw pixels; the cueing path is unaffected either "
+                         "way, since correction is applied only for the display)")
     ap.add_argument("--reset", action="store_true",
                     help="spinnaker only: load the factory Default user set and "
                          "make it the power-on default, then exit (resets the "
@@ -178,8 +182,12 @@ class _CamRun:
     cueing: Optional[CueingSystem]
 
 
-def _run_gui(runs: List[_CamRun], svc: CameraService, backend: str) -> None:
-    from PyQt6.QtWidgets import QApplication  # imported only when GUI is used
+def _run_gui(runs: List[_CamRun], svc: CameraService, backend: str,
+             display_wb: bool = True) -> None:
+    import signal
+
+    from PyQt6.QtCore import QTimer            # imported only when GUI is used
+    from PyQt6.QtWidgets import QApplication
     from gui_bridge import CameraViewer
     app = QApplication(sys.argv)
     viewers = []  # hold refs so the windows aren't garbage-collected
@@ -189,11 +197,25 @@ def _run_gui(runs: List[_CamRun], svc: CameraService, backend: str) -> None:
         # and is properly typed, unlike a default-arg lambda.
         win = CameraViewer(r.gui_fifo, title=f"{name} ({backend})",
                            health_fn=partial(svc.get_health, name),
-                           stats_fn=partial(svc.stats, name))
+                           stats_fn=partial(svc.stats, name),
+                           display_white_balance=display_wb)
         win.show()
         viewers.append(win)
-    log.info("Close the window(s) to stop.")
-    app.exec()  # one event loop; Qt quits when the last window closes
+
+    # Ctrl-C must quit the Qt loop *cleanly* so the caller's teardown
+    # (stop_streaming -> EndAcquisition -> DeInit -> ReleaseInstance) runs in
+    # order. Otherwise the interrupt lands inside app.exec()'s C++ loop, the SDK
+    # aborts (core dump), and the camera is left mid-acquisition with its config
+    # nodes locked (GenICam -2006) on the next connect. A periodic no-op timer
+    # hands control back to the interpreter so the pending SIGINT is delivered
+    # (Python signal handlers don't run while execution sits in app.exec()).
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    sigint_wake = QTimer()
+    sigint_wake.timeout.connect(lambda: None)
+    sigint_wake.start(200)
+
+    log.info("Close the window(s) or press Ctrl-C to stop.")
+    app.exec()  # one event loop; Qt quits when the last window closes (or Ctrl-C)
 
 
 def _run_headless(args: argparse.Namespace, svc: CameraService,
@@ -299,7 +321,7 @@ def main(argv=None) -> int:
         if args.headless:
             _run_headless(args, svc, runs)
         else:
-            _run_gui(runs, svc, args.backend)
+            _run_gui(runs, svc, args.backend, display_wb=not args.no_display_wb)
     except (CameraError, ConfigError) as e:
         # Expected operational failure (SDK missing, no camera, connect/stream
         # error): one clean line, no traceback. Unexpected errors still

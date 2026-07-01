@@ -26,7 +26,7 @@ import logging
 import os
 import sys
 
-from vision.acceptance import (AcceptanceCriteria, run_acceptance,
+from vision.acceptance import (AcceptanceCriteria, CheckResult, run_acceptance,
                                run_bandwidth_stress, run_connect_cycles,
                                run_recovery_cycles)
 from vision.camera_service import CameraService
@@ -109,14 +109,23 @@ def main(argv=None) -> int:
         cam = names[0]
         svc.connect(cam)
         report = run_acceptance(svc, cam, _criteria(args))
-        # Optional STRESS: bandwidth squeeze. Re-uses the connected service
-        # (run_bandwidth_stress reconnects as needed) before we shut it down.
+    except Exception as e:  # setup/connect/evaluation failure = failed acceptance
+        log.error("Acceptance run failed before evaluation: %s", e)
+        svc.shutdown()
+        return 1
+
+    # Optional STRESS: bandwidth squeeze. Re-uses the still-connected service
+    # (run_bandwidth_stress reconnects as needed). Guarded so a stress-path
+    # failure surfaces as a FAILED check rather than discarding the acceptance
+    # report we already have.
+    try:
         if args.stress_bandwidth is not None:
             report.checks.append(run_bandwidth_stress(
                 svc, cam, _criteria(args), args.stress_bandwidth))
-    except Exception as e:  # setup/connect failure is itself a failed acceptance
-        log.error("Acceptance run failed before evaluation: %s", e)
-        return 1
+    except Exception as e:
+        log.error("Bandwidth stress failed: %s", e)
+        report.checks.append(
+            CheckResult("bandwidth_stress", False, f"stress raised: {e}"))
     finally:
         svc.shutdown()
 

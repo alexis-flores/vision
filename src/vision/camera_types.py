@@ -129,6 +129,58 @@ class CameraConfig:
     # monotonic timebase, so downstream can correlate frames to host events /
     # other cameras. None/False = unchanged validated path (no latch, no tag).
     timestamp_sync: bool = False
+    # Opt-in HOST color correction for the raw-Bayer→BGR debayer path (which
+    # bypasses the on-camera ISP, so no white balance/CCM is applied → a slight
+    # green/yellow cast). Applied host-side in the driver's _convert(), color
+    # output only. Defaults leave the validated path unchanged.
+    #   white_balance: "none"  = unchanged (device hw_timestamp path intact)
+    #                  "gray_world" = cheap numpy per-channel gain (illuminant-
+    #                     agnostic; kills the dominant green cast; ~µs/frame)
+    #                  "ccm"  = Spinnaker ImageUtilityCCM color-correction matrix
+    #                     for the sensor (colorimetric; per-frame SDK cost — watch
+    #                     resulting_fps). Color is cosmetic for cueing; this mainly
+    #                     improves the GUI preview.
+    white_balance: str = "none"
+    # CCM illuminant preset (used only when white_balance == "ccm"); maps to
+    # PySpin SPINNAKER_CCM_COLOR_TEMP_<name>. NOTE: the IMX273 (BFS-16S2C) only
+    # supports a specific set — verified on SDK 4.3: INCANDESCENT_2765K,
+    # HALOGEN_3188K, FLUORESCENT_4665K, LED_4649K, LED_H_AND_E_4649K,
+    # DAYLIGHT_5034K, DAYLIGHT_H_AND_E_5034K. Pick the one nearest your lighting;
+    # LED_4649K suits typical lab LED. An unsupported combo is detected at connect
+    # and CCM is disabled (falls back to plain debayer) rather than breaking frames.
+    ccm_color_temp: str = "LED_4649K"
+    # Host debayer algorithm; maps to SPINNAKER_COLOR_PROCESSING_ALGORITHM_<name>.
+    # HQ_LINEAR is the balanced default; RIGOROUS / WEIGHTED_DIRECTIONAL_FILTER
+    # are higher quality but slower (measure resulting_fps before adopting).
+    color_algorithm: str = "HQ_LINEAR"
+    # Optional HOST gamma (ImageProcessor.ApplyGamma) on color frames. None = off.
+    # Named host_gamma to distinguish it from the DEVICE Gamma node, which is a
+    # separate mechanism set via set_config("gamma") / the GAMMA feature.
+    host_gamma: Optional[float] = None
+    # Opt-in extended GenICam chunk data (default off = only FrameID+Timestamp).
+    #   chunk_crc: enable the per-frame CRC chunk and reject frames that fail the
+    #     CRC check as MalformedFrameError (NFR-006) — catches corruption that
+    #     IsIncomplete() misses (a "complete" but corrupt frame).
+    #   chunk_telemetry: enable ExposureTime/Gain/BlackLevel chunks and surface
+    #     the device's ACTUAL per-frame values in frame.metadata (chunk_* keys).
+    #     DEFAULT ON — purely additive metadata (delivered frames are unchanged),
+    #     negligible cost, and useful ground-truth for downstream. Guarded, so a
+    #     camera without those chunks is a no-op.
+    chunk_crc: bool = False
+    chunk_telemetry: bool = True
+    # Opt-in reliability knobs (default off = validated path unchanged;
+    # HARDWARE-VALIDATION-PENDING — real behavior needs the camera).
+    #   soft_reset_on_fault: on a backend fault, issue a device reset (reboot the
+    #     camera firmware) before reconnecting — recovers a wedged-but-present
+    #     device without a physical unplug.
+    #   read_retry_on_fault: retry GetNextImage this many times on a NON-fatal,
+    #     non-timeout error before declaring a backend fault (0 = fault
+    #     immediately, as before). Device-fatal codes never retry.
+    #   packet_resend: enable USB3/GEV stream packet retransmission (guarded;
+    #     largely a GEV feature and may be absent on USB3).
+    soft_reset_on_fault: bool = False
+    read_retry_on_fault: int = 0
+    packet_resend: bool = False
 
     def __post_init__(self) -> None:
         self.max_pixel_count = self.max_resolution[0] * self.max_resolution[1]
@@ -171,6 +223,13 @@ class CameraConfig:
             warnings.append(
                 f"requested resolution {self.resolution} exceeds sensor "
                 f"max {self.max_resolution}")
+        # Catch fat-fingered enum-like string options: an unrecognised value
+        # otherwise SILENTLY disables the feature (no error), which is easy to
+        # miss. These are advisory — the driver already fails safe.
+        if self.white_balance not in ("none", "gray_world", "ccm"):
+            warnings.append(
+                f"white_balance {self.white_balance!r} unrecognised "
+                "(expected none|gray_world|ccm); no correction will be applied")
         return warnings
 
 

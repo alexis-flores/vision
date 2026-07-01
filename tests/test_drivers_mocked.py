@@ -27,9 +27,10 @@ from vision.camera_types import (CameraConfig, CameraFeature, CameraStatus,
 #   Fake PySpin
 # --------------------------------------------------------------------------- #
 
-def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
-                      frame_hw=(1080, 1440, 3)):
+def _make_fake_pyspin(getnext_errorcode=None, incomplete=False, crc_fail=False,
+                      select_raises=False, frame_hw=(1080, 1440, 3)):
     PySpin = types.ModuleType("PySpin")
+    PySpin.SPINNAKER_IMAGE_STATUS_CRC_CHECK_FAILED = 1
     PySpin._select = {"mode": None, "arg": None}  # records GetBySerial vs GetByIndex
 
     class SpinnakerException(Exception):
@@ -41,6 +42,11 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
     PySpin.SpinnakerException = SpinnakerException
     PySpin.EVENT_TIMEOUT_INFINITE = -1
     PySpin.SPINNAKER_ERR_TIMEOUT = -1011
+    PySpin.SPINNAKER_ERR_ABORT = -1012          # device-fatal codes (never retried)
+    PySpin.SPINNAKER_ERR_INVALID_HANDLE = -1006
+    PySpin.SPINNAKER_ERR_ACCESS_DENIED = -1005
+    PySpin.SPINNAKER_ERR_IO = -1010
+    PySpin.SPINNAKER_ERR_NOT_AVAILABLE = -1014
     PySpin.HQ_LINEAR = 0
     PySpin.SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR = 1
     PySpin.AcquisitionMode_Continuous = 2
@@ -75,17 +81,20 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
         def Execute(self): self.executed = True
 
     class Image:
-        def __init__(self, arr, inc=False, frame_id=42):
+        def __init__(self, arr, inc=False, frame_id=42, status=9):
             self.arr, self.inc, self.released = arr, inc, False
-            self._frame_id = frame_id
+            self._frame_id, self._status = frame_id, status
         def IsIncomplete(self): return self.inc
-        def GetImageStatus(self): return 9
+        def GetImageStatus(self): return self._status
         def GetNDArray(self): return self.arr
         def GetTimeStamp(self): return 123456789
         def GetChunkData(self):
             fid = self._frame_id
             class _CD:
                 def GetFrameID(self): return fid
+                def GetExposureTime(self): return 5000.0
+                def GetGain(self): return 1.5
+                def GetBlackLevel(self): return 2.0
             return _CD()
         def Release(self): self.released = True
 
@@ -93,8 +102,28 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
         def SetColorProcessing(self, algo): self.algo = algo
         def Convert(self, img, target):
             return Image(np.zeros(frame_hw, np.uint8))
+        def ApplyGamma(self, img, gamma): return img
 
     PySpin.ImageProcessor = ImageProcessor
+
+    # Host CCM API (mirror the modern SDK so white_balance="ccm" runs off-rig).
+    for nm in ("SPINNAKER_CCM_SENSOR_IMX273", "SPINNAKER_CCM_TYPE_LINEAR",
+               "SPINNAKER_CCM_COLOR_SPACE_SRGB",
+               "SPINNAKER_CCM_APPLICATION_MICROSCOPY",
+               "SPINNAKER_CCM_COLOR_TEMP_LED_4649K",
+               "SPINNAKER_COLOR_PROCESSING_ALGORITHM_RIGOROUS"):
+        setattr(PySpin, nm, nm)
+    PySpin.CCMSettings = type("CCMSettings", (), {})  # attrs set dynamically
+    PySpin.Image.Create = staticmethod(
+        lambda w, h, ox, oy, fmt, buf: Image(np.asarray(buf)))
+
+    class ImageUtilityCCM:
+        calls = {"count": 0}
+        @staticmethod
+        def CreateColorCorrected(img, settings):
+            ImageUtilityCCM.calls["count"] += 1
+            return Image(np.asarray(img.GetNDArray()))
+    PySpin.ImageUtilityCCM = ImageUtilityCCM
 
     class EnumEntry:
         def GetValue(self): return 5
@@ -108,6 +137,7 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
 
     PySpin.CEnumerationPtr = lambda node: node
     PySpin.CIntegerPtr = lambda node: node
+    PySpin.CBooleanPtr = lambda node: node
     PySpin.IsAvailable = lambda n: True
     PySpin.IsWritable = lambda n: True
     PySpin.IsReadable = lambda n: True
@@ -142,10 +172,13 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             self.UserSetSelector = Enum()
             self.UserSetDefault = Enum()
             self.UserSetLoad = Command()
+            self.DeviceReset = Command()
             self.TimestampLatch = Command()
             self.TimestampLatchValue = Num(123456789, 0, 2**63)  # matches img ts
             self.inited = self.acquiring = False
             self.deinit_calls = self.endacq_calls = 0
+            self.images_in_use = 0
+        def GetNumImagesInUse(self): return self.images_in_use
         def Init(self): self.inited = True
         def DeInit(self): self.inited = False; self.deinit_calls += 1
         def BeginAcquisition(self): self.acquiring = True
@@ -159,17 +192,24 @@ def _make_fake_pyspin(getnext_errorcode=None, incomplete=False,
             if getnext_errorcode is not None:
                 raise SpinnakerException("injected GetNextImage error",
                                          errorcode=getnext_errorcode)
-            return Image(np.zeros(frame_hw, np.uint8), inc=incomplete)
+            return Image(np.zeros(frame_hw, np.uint8), inc=incomplete,
+                         status=(1 if crc_fail else 9))
 
     cam = Camera()
+
+    PySpin._cam_list = {"cleared": 0}
 
     class CamList:
         def GetSize(self): return 1
         def GetBySerial(self, s):
+            if select_raises:
+                raise SpinnakerException("injected selection failure")
             PySpin._select.update(mode="serial", arg=s); return cam
         def GetByIndex(self, i):
+            if select_raises:
+                raise SpinnakerException("injected selection failure")
             PySpin._select.update(mode="index", arg=i); return cam
-        def Clear(self): pass
+        def Clear(self): PySpin._cam_list["cleared"] += 1
 
     PySpin._released = {"count": 0}
 
@@ -376,6 +416,173 @@ class TestSpinnakerDriverMocked(unittest.TestCase):
         frame = drv.read_frame(timeout=1.0)   # must not raise
         self.assertIsNotNone(frame.data)
         drv.stop_stream(); drv.disconnect()
+
+    def test_gray_world_balance_equalizes_channels(self):
+        # Pure-numpy white balance: a green-cast frame -> equal channel means.
+        from vision.image_ops import gray_world_balance
+        cast = np.dstack([np.full((4, 4), 40, np.uint8),
+                          np.full((4, 4), 200, np.uint8),
+                          np.full((4, 4), 60, np.uint8)])
+        out = gray_world_balance(cast)
+        means = out.reshape(-1, 3).mean(0)
+        self.assertTrue(np.allclose(means, means[0], atol=1.0), means)
+
+    def test_white_balance_gray_world_through_convert(self):
+        # gray_world actually balances end-to-end through read_frame->_convert
+        # (not just wiring): a green-cast conversion output -> equalized channel
+        # means on the delivered frame.
+        fake, drv = self._install()
+        drv.config.white_balance = "gray_world"
+        drv.connect()
+        cast = np.dstack([np.full((8, 8), 40, np.uint8),
+                          np.full((8, 8), 200, np.uint8),
+                          np.full((8, 8), 60, np.uint8)])
+        _Image = type(fake._cam.GetNextImage(0))   # the fake Image class
+
+        class _CastProcessor:
+            def Convert(self, img, target): return _Image(cast)
+        drv._processor = _CastProcessor()
+        drv.start_stream()
+        means = drv.read_frame(timeout=1.0).data.reshape(-1, 3).mean(0)
+        self.assertTrue(np.allclose(means, means[0], atol=1.0), means)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_white_balance_ccm_applies_when_available(self):
+        # white_balance=ccm builds CCM settings at connect (trial-validated) and
+        # CreateColorCorrected is invoked per frame.
+        fake, drv = self._install()
+        drv.config.white_balance = "ccm"
+        drv.config.ccm_color_temp = "LED_4649K"
+        before = fake.ImageUtilityCCM.calls["count"]
+        drv.connect()
+        self.assertIsNotNone(drv._ccm_settings)      # built + trial-validated
+        drv.start_stream(); drv.read_frame(timeout=1.0)
+        self.assertGreater(fake.ImageUtilityCCM.calls["count"], before)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_white_balance_ccm_unavailable_degrades(self):
+        # ccm requested but the SDK lacks the CCM API -> disabled, plain debayer.
+        fake, drv = self._install()
+        delattr(fake, "ImageUtilityCCM")
+        drv.config.white_balance = "ccm"
+        drv.connect()
+        self.assertIsNone(drv._ccm_settings)
+        drv.start_stream()
+        self.assertEqual(drv.read_frame(timeout=1.0).data.ndim, 3)  # no crash
+        drv.stop_stream(); drv.disconnect()
+
+    def test_color_algorithm_is_configurable(self):
+        # color_algorithm selects the debayer algorithm on the processor.
+        fake, drv = self._install()
+        drv.config.color_algorithm = "RIGOROUS"
+        drv.connect()
+        self.assertEqual(drv._processor.algo,
+                         "SPINNAKER_COLOR_PROCESSING_ALGORITHM_RIGOROUS")
+        drv.disconnect()
+
+    def test_chunk_telemetry_on_by_default_populates_metadata(self):
+        # chunk_telemetry is ON by default (additive) -> the device's actual
+        # per-frame exposure/gain/black land in frame.metadata. Relies on the
+        # default, so it also guards the default value.
+        fake, drv = self._install()
+        drv.connect(); drv.start_stream()
+        m = drv.read_frame(timeout=1.0).metadata
+        self.assertEqual(m["chunk_exposure_us"], 5000.0)
+        self.assertEqual(m["chunk_gain_db"], 1.5)
+        self.assertEqual(m["chunk_black_level"], 2.0)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_chunk_telemetry_opt_out(self):
+        fake, drv = self._install()
+        drv.config.chunk_telemetry = False
+        drv.connect(); drv.start_stream()
+        m = drv.read_frame(timeout=1.0).metadata
+        self.assertNotIn("chunk_exposure_us", m)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_chunk_crc_failure_is_malformed(self):
+        # Opt-in chunk_crc: a CRC-failed (but 'complete') frame -> Malformed.
+        fake, drv = self._install(crc_fail=True)
+        drv.config.chunk_crc = True
+        drv.connect(); drv.start_stream()
+        with self.assertRaises(MalformedFrameError):
+            drv.read_frame(timeout=1.0)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_crc_status_ignored_when_chunk_crc_off(self):
+        # Same CRC-failed status, but chunk_crc off -> frame is delivered (the
+        # integrity gate is strictly opt-in; default path unchanged).
+        fake, drv = self._install(crc_fail=True)
+        drv.connect(); drv.start_stream()
+        self.assertIsNotNone(drv.read_frame(timeout=1.0).data)  # not malformed
+        drv.stop_stream(); drv.disconnect()
+
+    def test_soft_reset_off_by_default(self):
+        # Default: soft_reset is a no-op (no DeviceReset issued).
+        fake, drv = self._install()
+        drv.connect()
+        self.assertFalse(drv.soft_reset())
+        self.assertFalse(fake._cam.DeviceReset.executed)
+        drv.disconnect()
+
+    def test_soft_reset_opt_in_issues_device_reset(self):
+        # Opt-in: soft_reset issues DeviceReset and flags the handle lost (the
+        # device re-enumerates, so teardown must skip native cleanup).
+        fake, drv = self._install()
+        drv.config.soft_reset_on_fault = True
+        drv.connect()
+        self.assertTrue(drv.soft_reset())
+        self.assertTrue(fake._cam.DeviceReset.executed)
+        self.assertTrue(drv._lost)
+        drv.disconnect()
+
+    def test_read_retry_on_fault_retries_then_faults(self):
+        # Opt-in read_retry_on_fault: a NON-fatal, non-timeout error is retried
+        # before the backend fault is declared.
+        fake, drv = self._install(getnext_errorcode=-9999)  # non-fatal transient
+        drv.config.read_retry_on_fault = 2
+        drv.connect(); drv.start_stream()
+        with self.assertLogs("vision.spinnaker_driver", level="WARNING") as cm:
+            with self.assertRaises(CameraError):
+                drv.read_frame(timeout=0.5)
+        self.assertEqual(sum("retrying" in m for m in cm.output), 2)
+        self.assertTrue(drv._lost)   # exhausted -> conservative lost
+
+    def test_device_fatal_code_is_not_retried(self):
+        # A device-fatal code (ABORT) faults immediately even with retry budget.
+        fake, drv = self._install(getnext_errorcode=-1012)  # SPINNAKER_ERR_ABORT
+        drv.config.read_retry_on_fault = 5
+        drv.connect(); drv.start_stream()
+        with self.assertRaises(CameraError):
+            drv.read_frame(timeout=0.5)
+        self.assertTrue(drv._lost)
+
+    def test_packet_resend_opt_in_runs(self):
+        # Opt-in packet_resend applies without crashing (node present in fake).
+        fake, drv = self._install()
+        drv.config.packet_resend = True
+        drv.connect(); drv.start_stream()
+        self.assertEqual(drv.get_status(), CameraStatus.STREAMING)
+        drv.stop_stream(); drv.disconnect()
+
+    def test_disconnect_warns_on_images_in_use(self):
+        # Lifecycle guard: a non-zero GetNumImagesInUse at teardown logs a WARN
+        # (a consumer held a frame past release) but never blocks disconnect.
+        fake, drv = self._install()
+        drv.connect()
+        fake._cam.images_in_use = 2
+        with self.assertLogs("vision.spinnaker_driver", level="WARNING") as cm:
+            drv.disconnect()
+        self.assertTrue(any("in use" in m for m in cm.output))
+        self.assertEqual(drv.get_status(), CameraStatus.DISCONNECTED)
+
+    def test_connect_clears_camera_list_on_selection_failure(self):
+        # Hardening: if GetBySerial/GetByIndex raises, the camera list is still
+        # Clear()ed (try/finally) so it can't outlive its camera at teardown.
+        fake, drv = self._install(serial="BFS1", select_raises=True)
+        with self.assertRaises(CameraError):
+            drv.connect()
+        self.assertGreaterEqual(fake._cam_list["cleared"], 1)
 
     def test_incomplete_frame_is_malformed(self):
         fake, drv = self._install(incomplete=True)

@@ -52,7 +52,11 @@ def _load_raw(path: str) -> Dict[str, Any]:
                 except ImportError as e:
                     raise ConfigError(
                         "PyYAML required for YAML config files") from e
-                return yaml.safe_load(fh) or {}
+                try:
+                    return yaml.safe_load(fh) or {}
+                except yaml.YAMLError as e:  # NOT a ValueError subclass
+                    raise ConfigError(
+                        f"Malformed configuration file {path}: {e}") from e
             return json.load(fh)
     except (json.JSONDecodeError, ValueError) as e:
         raise ConfigError(f"Malformed configuration file {path}: {e}") from e

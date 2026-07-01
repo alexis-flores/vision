@@ -19,6 +19,7 @@ teardown. We therefore keep every backing array alive on the instance.
 from __future__ import annotations
 
 import os
+import time
 import unittest
 
 import numpy as np
@@ -114,6 +115,41 @@ class TestSpinnakerRealSDK(unittest.TestCase):
         self.assertEqual(out.dtype, np.uint8)
         self.assertTrue(out.flags.owndata)
 
+    # --- opt-in host color correction (WB / CCM / gamma) ------------------ #
+
+    def _color_driver(self, **cfg_kw):
+        drv = SpinnakerCameraDriver(CameraConfig(
+            name="bfs", output_pixel_format=PixelFormat.BGR8,
+            device_pixel_format="BayerRG8", features=CameraFeature.RESOLUTION,
+            **cfg_kw))
+        drv._pyspin = PySpin
+        drv._init_processor()
+        return drv
+
+    def test_real_ccm_supported_temp_enables(self):
+        # A sensor-supported color temp -> CCM is built AND trial-validated on
+        # the real SDK, and _convert yields a full-res 3-channel frame.
+        drv = self._color_driver(white_balance="ccm", ccm_color_temp="LED_4649K")
+        self.assertIsNotNone(drv._ccm_settings)
+        out = drv._convert(self._bayer_image())
+        self.assertEqual(out.shape, (1080, 1440, 3))
+
+    def test_real_ccm_unsupported_temp_disables_gracefully(self):
+        # The IMX273 rejects the GENERAL combo (verified -1003). The connect-time
+        # trial must disable CCM so frames are a plain 3-channel debayer, NOT a
+        # broken raw 2-D frame. This is the regression the real SDK revealed.
+        drv = self._color_driver(white_balance="ccm", ccm_color_temp="GENERAL")
+        self.assertIsNone(drv._ccm_settings)
+        out = drv._convert(self._bayer_image())
+        self.assertEqual(out.ndim, 3)
+        self.assertEqual(out.shape, (1080, 1440, 3))
+
+    def test_real_gray_world_and_gamma_run(self):
+        drv = self._color_driver(white_balance="gray_world", host_gamma=0.5)
+        out = drv._convert(self._bayer_image())
+        self.assertEqual(out.shape, (1080, 1440, 3))
+        self.assertEqual(out.dtype, np.uint8)
+
     def test_getndarray_copy_is_independent(self):
         # Validates the premise of the _convert use-after-free guard: a copy is
         # independent of the SDK-owned source buffer.
@@ -152,6 +188,16 @@ class TestSpinnakerRealSDK(unittest.TestCase):
         desc = PySpin.Image.GetImageStatusDescription(status)
         self.assertIsInstance(desc, str)
         self.assertIn("incomplete", desc.lower())
+
+    # --- reliability: error-code classification (named constants) --------- #
+
+    def test_fatal_error_codes_resolve_on_real_sdk(self):
+        # The device-fatal set is resolved by NAME against the installed SDK
+        # (values differ across versions — never hardcode). TIMEOUT is NOT fatal.
+        codes = self._driver()._fatal_error_codes()
+        self.assertIn(PySpin.SPINNAKER_ERR_ABORT, codes)
+        self.assertIn(PySpin.SPINNAKER_ERR_IO, codes)
+        self.assertNotIn(PySpin.SPINNAKER_ERR_TIMEOUT, codes)
 
     # --- the real System lifecycle on the no-camera path ------------------ #
 
@@ -244,6 +290,129 @@ class TestSpinnakerHardware(unittest.TestCase):  # HW-001 (real device)
             drv.stop_stream()
         finally:
             drv.disconnect()
+
+
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+#   Opt-in FEATURES on a real camera (HW-002)
+# ✵✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✧✵
+
+@unittest.skipUnless(_spinnaker_camera_present(),
+                     "PySpin + a physical BlackFly S camera not present")
+class TestSpinnakerFeaturesHW(unittest.TestCase):
+    """Exercises the opt-in features against a REAL camera, so `run the tests`
+    confirms each actually works on the sensor (not just in mocks). Each test
+    builds the BFS config with one feature enabled, connects, streams a few
+    frames, and asserts the behaviour. Skips cleanly with no camera.
+
+    Env: `VISION_TEST_SERIAL` binds a specific unit (else index 0);
+    `VISION_TEST_SOFT_RESET=1` includes the disruptive DeviceReset check.
+    """
+
+    def _driver(self, **overrides) -> SpinnakerCameraDriver:
+        """Fresh driver from the BFS config with `overrides` applied. Registers
+        disconnect() cleanup so a failing assert still releases the camera."""
+        cfg = load_camera_config(os.path.join(CONFIG_DIR, "bfs_u3_16s2c.json"))
+        serial = os.environ.get("VISION_TEST_SERIAL")
+        if serial:
+            cfg.serial = serial
+        for key, val in overrides.items():
+            setattr(cfg, key, val)
+        drv = SpinnakerCameraDriver(cfg)
+        self.addCleanup(drv.disconnect)
+        return drv
+
+    def _frames(self, drv, n=3, timeout=2.0):
+        drv.start_stream()
+        try:
+            return [drv.read_frame(timeout=timeout) for _ in range(n)]
+        finally:
+            if drv.get_status() == CameraStatus.STREAMING:
+                drv.stop_stream()
+
+    # --- timestamps ------------------------------------------------------- #
+
+    def test_hw_timestamp_sync_tags_host_time(self):
+        drv = self._driver(timestamp_sync=True)
+        drv.connect()
+        f = self._frames(drv, n=2)[-1]
+        self.assertIn("host_capture_time_s", f.metadata)
+        # on the host monotonic timebase -> close to 'now'
+        self.assertLess(abs(f.metadata["host_capture_time_s"] - time.monotonic()),
+                        5.0)
+
+    # --- chunk data ------------------------------------------------------- #
+
+    def test_hw_chunk_telemetry_reports_exposure(self):
+        drv = self._driver()  # chunk_telemetry is default-on
+        drv.connect()
+        f = self._frames(drv)[-1]
+        self.assertIn("chunk_exposure_us", f.metadata)
+        self.assertGreater(f.metadata["chunk_exposure_us"], 0.0)
+
+    def test_hw_chunk_crc_does_not_starve(self):
+        # CRC checking on: a healthy BFS reports clean CRC, so frames still flow
+        # (a broken/false-positive CRC would reject them all).
+        drv = self._driver(chunk_crc=True)
+        drv.connect()
+        self.assertEqual(len(self._frames(drv, n=5)), 5)
+
+    # --- host colour ------------------------------------------------------ #
+
+    def test_hw_ccm_enables_and_delivers(self):
+        drv = self._driver(white_balance="ccm", ccm_color_temp="LED_4649K")
+        drv.connect()
+        self.assertIsNotNone(drv._ccm_settings)  # built + trial-validated on SDK
+        self.assertEqual(self._frames(drv)[-1].data.ndim, 3)
+
+    def test_hw_gray_world_delivers(self):
+        drv = self._driver(white_balance="gray_world")
+        drv.connect()
+        self.assertEqual(self._frames(drv)[-1].data.shape[2], 3)
+
+    def test_hw_rgb8_output_labelled_and_shaped(self):
+        drv = self._driver(output_pixel_format=PixelFormat.RGB8)
+        drv.connect()
+        f = self._frames(drv)[-1]
+        self.assertEqual(f.data.shape[2], 3)
+        self.assertEqual(f.pixel_format, PixelFormat.RGB8)
+
+    # --- reliability knobs (start cleanly) -------------------------------- #
+
+    def test_hw_packet_resend_and_read_retry_start_cleanly(self):
+        drv = self._driver(packet_resend=True, read_retry_on_fault=2)
+        drv.connect()
+        f = self._frames(drv, n=2)[-1]  # must stream without error
+        self.assertIsNotNone(f.data)
+
+    # --- health ----------------------------------------------------------- #
+
+    def test_hw_get_health_reports_temperature(self):
+        drv = self._driver()
+        drv.connect()
+        health = drv.get_health()
+        self.assertIn("temperature_c", health)
+        self.assertGreater(health["temperature_c"], 0.0)
+
+    # --- device reset (disruptive; opt-in via env var) -------------------- #
+
+    @unittest.skipUnless(os.environ.get("VISION_TEST_SOFT_RESET") == "1",
+                         "set VISION_TEST_SOFT_RESET=1 to run the DeviceReset check")
+    def test_hw_soft_reset_reboots_and_recovers(self):
+        drv = self._driver(soft_reset_on_fault=True)
+        drv.connect()
+        self.assertTrue(drv.soft_reset())        # issues DeviceReset, flags lost
+        self.assertTrue(drv._lost)
+        drv.disconnect()                         # skips native cleanup (lost)
+        # The camera re-enumerates (DeviceReset takes seconds) — poll-reconnect.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            try:
+                drv.connect()
+                break
+            except CameraError:
+                time.sleep(0.5)
+        self.assertEqual(drv.get_status(), CameraStatus.CONNECTED,
+                         "camera did not re-enumerate within 20s of DeviceReset")
 
 
 if __name__ == "__main__":

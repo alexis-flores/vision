@@ -114,6 +114,13 @@ class CameraDriver(abc.ABC):
         user set). Backends that support it override this; the default raises."""
         raise CameraError("reset_to_defaults is not supported by this backend")
 
+    def soft_reset(self) -> bool:
+        """Attempt an in-place device reset (reboot the camera firmware) to
+        recover a wedged-but-present device without a physical unplug. Returns
+        True if a reset was issued (caller must then reconnect). Backends that
+        support it override this; the default is a no-op returning False."""
+        return False
+
     def get_status(self) -> CameraStatus:
         with self._lock:
             return self._status

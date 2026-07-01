@@ -30,6 +30,9 @@ gui = ["PyQt6>=6.4"]
 # YAML camera configs (config_loader.py reads these lazily if present).
 yaml = ["PyYAML>=6.0"]
 
+# Interactive rig tuning / colour QA notebook (notebooks/rig_tuning.ipynb).
+notebook = ["jupyter>=1.0", "matplotlib>=3.5"]
+
 # Test / development + QA tooling.
 dev = [
     "pytest>=7.0",
@@ -65,7 +68,7 @@ timeout = 120          # fail (don't hang) if a threaded test deadlocks
 
 [tool.ruff]
 line-length = 100
-extend-exclude = ["Spinnaker", "Spinnaker-Examples-main"]
+extend-exclude = ["Spinnaker", "Spinnaker-Examples-main", "notebooks"]
 
 [tool.ruff.lint.per-file-ignores]
 # Test files set sys.path before importing the package (E402) and use compact

@@ -44,3 +44,6 @@ Spinnaker-Python-Programmer-Guide.pdf
 # Claude Code: ignore only per-machine local settings; SHIP the shared
 # CLAUDE.md (repo root) and .claude/skills/ so a cloned rig gets the kit.
 .claude/settings.local.json
+
+# Jupyter
+.ipynb_checkpoints/

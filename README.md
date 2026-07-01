@@ -256,6 +256,12 @@ pytest                                            # all
 pytest tests/test_camera_service.py::TestCameraService::test_malformed_skip
 ```
 
+**Interactive rig tuning (`notebooks/rig_tuning.ipynb`).** The tests do the
+*objective* checks; the notebook is for the *subjective* ones — grab frames, tune
+exposure/gain live, and eyeball colour (compare `white_balance`/`ccm_color_temp`
+options side by side) + timing-jitter plots. Install `pip install -e ".[notebook]"`,
+launch Jupyter from the interpreter that has `vision`+PySpin, set the serial, run.
+
 | Test file | What it covers | Needs |
 |---|---|---|
 | `tests/test_config.py` | config ingestion (FR-001) + NFR validation | core |
